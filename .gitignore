@@ -9,7 +9,7 @@ venv/
 
 # Build
 build/
-out/
+output/
 
 # Test / coverage
 .pytest_cache/
@@ -33,3 +33,6 @@ temp/
 # Secrets
 *.pem
 *.key
+
+# Data
+data/*
