@@ -2,4 +2,4 @@
 
 paddleocr
 paddlepaddle==3.3.0
-
+vietocr

@@ -10,9 +10,12 @@ venv/
 # Build
 build/
 output/
+__pycache__/
+*pyc
 
 # Test / coverage
 .pytest_cache/
+
 
 # Logs
 *.log
@@ -36,3 +39,6 @@ temp/
 
 # Data
 data/*
+
+# Agents
+AGENTS.md
