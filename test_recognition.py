@@ -24,6 +24,8 @@ recognitor = Predictor(config)
 
 input_dir = Path("./data/image/")       # Thư mục chứa ảnh đầu vào
 image_files = list(input_dir.glob("*")) # Lấy toàn bộ file trong thư mục
+output_dir = Path("./output/recognition/") # Thư mục lưu ảnh có kết quả recognition
+output_dir.mkdir(parents=True, exist_ok=True)
 
 print(f"Tìm thấy {len(image_files)} file")
 
@@ -31,6 +33,7 @@ for i, image_path in enumerate(image_files, start=1):
     print(f"[{i}/{len(image_files)}] Đang xử lý: {image_path.name}")
 
     image = cv2.imread(str(image_path))
+    output_image = image.copy()
     results = detector.predict(
         str(image_path),               # Đường dẫn ảnh cần detection
 
@@ -54,5 +57,22 @@ for i, image_path in enumerate(image_files, start=1):
             crop = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
             text = recognitor.predict(Image.fromarray(crop))
             print(f"  - {text}")
+
+            # Vẽ polygon và kết quả nhận dạng lên ảnh gốc.
+            points = box.astype(np.int32)
+            cv2.polylines(output_image, [points], True, (0, 255, 0), 2)
+            cv2.putText(
+                output_image,
+                str(text),
+                (x_min, max(y_min - 10, 20)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+    # Lưu ảnh gốc đã vẽ vùng detection và text recognition.
+    cv2.imwrite(str(output_dir / image_path.name), output_image)
 
     print(f"[{i}/{len(image_files)}] Hoàn thành: {image_path.name}")

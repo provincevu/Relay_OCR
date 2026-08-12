@@ -1,5 +1,8 @@
 --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
 
-paddleocr
+paddleocr==3.7.0
 paddlepaddle==3.3.0
-vietocr
+vietocr==0.3.13
+torch==2.13.0
+setuptools<82
+torchvision==0.28.0
