@@ -1,6 +1,14 @@
 from pathlib import Path
 from paddleocr import TextDetection
 
+# Mục đích: kiểm tra trực tiếp chức năng text detection của PaddleOCR trên toàn bộ ảnh đầu vào.
+# Chức năng: khởi tạo TextDetection, chạy detection và lưu ảnh/json kết quả.
+# Luồng xử lý: đọc data/image/ → predict từng ảnh → lưu vào output/image/ và output/json/.
+# Cấu hình/parameter: model PP-OCRv6_medium_det, CPU, paddle_static, các ngưỡng limit/thresh/box_thresh/unclip_ratio.
+# Quan hệ: script chạy độc lập, không import Detector hoặc OCRService.
+# Input/output: input là các file trong data/image/; output là ảnh đã vẽ box và JSON tọa độ detection.
+# Contract: giữ các tham số predict và cách lấy result.save_to_img()/save_to_json() để đối chiếu behavior detection.
+
 detector = TextDetection(
     model_name="PP-OCRv6_medium_det",  # Model dùng để phát hiện vùng chứa text
     device="cpu",                      # Thiết bị chạy inference: cpu, gpu:0,...

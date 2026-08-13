@@ -7,6 +7,14 @@ from paddleocr import (
     TextLineOrientationClassification,
 )
 
+# Mục đích: đóng gói các bước tiền xử lý ảnh độc lập của PaddleOCR.
+# Chức năng: xoay tài liệu, hiệu chỉnh ảnh méo và xoay crop textline khi từng tùy chọn được bật.
+# Luồng xử lý: ảnh đường dẫn → đọc vào bộ nhớ → orientation → unwarping → trả ảnh numpy BGR.
+# Cấu hình/parameter: use_doc_orientation_classify mặc định True; use_doc_unwarping và use_textline_orientation mặc định False; debug mặc định False.
+# Quan hệ: được OCRService gọi trước Detector và trước Recognitor; phụ thuộc ba module tiền xử lý của PaddleOCR.
+# Input/output: preprocess() nhận đường dẫn và trả ảnh numpy; preprocess_textline() nhận/trả crop ảnh numpy BGR.
+# Contract: nhãn textline 180_degree phải được xử lý thành góc 180; chỉ lưu ảnh vào output/preprocessing khi debug=True.
+
 
 class ImagePreprocessing:
     """Đóng gói các bước tiền xử lý ảnh của PaddleOCR."""

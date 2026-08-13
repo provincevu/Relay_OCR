@@ -5,6 +5,14 @@ from .services.detector import Detector
 from .services.image_preprocessing import ImagePreprocessing
 from .services.recognitor import Recognitor
 
+# Mục đích: cung cấp dịch vụ OCR kết hợp tiền xử lý, detection và recognition.
+# Chức năng: phát hiện vùng văn bản qua detect_text() và nhận dạng từng vùng qua recognize_text().
+# Luồng xử lý: ảnh đầu vào → ImagePreprocessing → Detector → cắt dt_polys → Recognitor.
+# Cấu hình: nhận một dict config và truyền cùng cấu hình đó cho ba thành phần bên dưới.
+# Quan hệ: được gọi từ tầng sử dụng OCR; phụ thuộc ImagePreprocessing, Detector và Recognitor.
+# Input/output: nhận đường dẫn ảnh; detect_text() trả kết quả PaddleOCR, recognize_text() trả danh sách box/text.
+# Contract: giữ tên hai phương thức, khóa dt_polys của kết quả detection và dạng kết quả box/text.
+
 
 class OCRService:
     """Dịch vụ OCR kết hợp phát hiện và nhận dạng văn bản."""

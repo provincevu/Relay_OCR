@@ -7,6 +7,14 @@ from paddleocr import TextDetection
 from vietocr.tool.config import Cfg
 from vietocr.tool.predictor import Predictor
 
+# Mục đích: kiểm tra pipeline detection kết hợp recognition bằng VietOCR VGG Transformer.
+# Chức năng: phát hiện polygon text, cắt từng vùng, nhận dạng và vẽ kết quả lên ảnh.
+# Luồng xử lý: đọc data/image/ → PaddleOCR detection → cắt dt_polys → VietOCR → lưu output/recognition/.
+# Cấu hình/parameter: detector dùng PP-OCRv6_medium_det; recognitor dùng vgg_transformer; các ngưỡng detection giữ như test_detection.py.
+# Quan hệ: script chạy độc lập và là mẫu tham khảo cho Detector, Recognitor và OCRService.
+# Input/output: input là ảnh trong data/image/; output là text trên console và ảnh có box/text trong output/recognition/.
+# Contract: giữ dt_polys là polygon bốn điểm, crop chuyển BGR sang RGB trước khi đưa vào VietOCR.
+
 
 detector = TextDetection(
     model_name="PP-OCRv6_medium_det",  # Mô hình dùng để phát hiện vùng chứa text

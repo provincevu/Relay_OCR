@@ -1,6 +1,14 @@
 from pathlib import Path
 from paddleocr import TextDetection
 
+# Mục đích: đóng gói chức năng phát hiện các vùng chứa văn bản bằng PaddleOCR.
+# Chức năng: khởi tạo TextDetection và chạy detection cho một ảnh qua detect().
+# Luồng xử lý: nhận ảnh → TextDetection.predict() → trả về kết quả detection gốc.
+# Cấu hình/parameter: model_name, device, engine, cpu_threads, enable_mkldnn và các ngưỡng detection.
+# Quan hệ: được OCRService gọi; phụ thuộc TextDetection của PaddleOCR.
+# Input/output: nhận đường dẫn ảnh hoặc ảnh numpy; trả về danh sách kết quả có dt_polys.
+# Contract: giữ tên Detector.detect(), các khóa config mặc định và cấu trúc kết quả PaddleOCR.
+
 
 class Detector:
     """chức năng phát hiện vùng chứa văn bản."""
