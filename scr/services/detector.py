@@ -18,7 +18,7 @@ class Detector:
     def detect(self, image_path):
         """Phát hiện các vùng chứa văn bản trong một ảnh."""
         results = self.detector.predict(
-            str(image_path),
+            image_path,
             limit_side_len=self.config.get("limit_side_len", 1600),         # Giới hạn kích thước ảnh
             limit_type=self.config.get("limit_type", "max"),                # Cách áp dụng giới hạn kích thước
             thresh=self.config.get("thresh", 0.3),                          # Ngưỡng xác định điểm ảnh thuộc vùng văn bản

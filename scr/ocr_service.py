@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 
 from .services.detector import Detector
+from .services.image_preprocessing import ImagePreprocessing
 from .services.recognitor import Recognitor
 
 
@@ -10,18 +11,21 @@ class OCRService:
 
     def __init__(self, config):
         self.config = config
+        self.image_preprocessing = ImagePreprocessing(config)
         self.detector = Detector(config)
         self.recognitor = Recognitor(config)
 
     def detect_text(self, image):
-        # Thực hiện phát hiện vùng văn bản
-        results = self.detector.detect(image)
+        # Tiền xử lý ảnh trước khi phát hiện vùng văn bản
+        processed_image = self.image_preprocessing.preprocess(image)
+        results = self.detector.detect(processed_image)
         return results
 
     def recognize_text(self, image):
-        # Đọc ảnh để cắt các vùng văn bản được phát hiện
-        source_image = cv2.imread(str(image))
-        detection_results = self.detector.detect(image)
+        # Tiền xử lý ảnh trước khi detection và recognition
+        processed_image = self.image_preprocessing.preprocess(image)
+        source_image = processed_image
+        detection_results = self.detector.detect(processed_image)
         results = []
 
         for result in detection_results:
@@ -33,6 +37,8 @@ class OCRService:
                 x_max, y_max = box.max(axis=0).astype(int)
                 crop = source_image[y_min:y_max, x_min:x_max]
 
+                # Xoay crop theo hướng dòng chữ nếu được bật
+                crop = self.image_preprocessing.preprocess_textline(crop)
                 text = self.recognitor.recognize(crop)
                 results.append({"box": box.tolist(), "text": text})
 
