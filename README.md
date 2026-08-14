@@ -17,3 +17,5 @@ pip install -r requirements.txt
 ```bash
 python -c "import paddle; print(paddle.__version__)"
 ```
+
+chỉ xuất ảnh khi ở chế độ debug
