@@ -5,18 +5,19 @@ from paddleocr import LayoutDetection
 
 # Mục đích: debug nhận diện các vùng bảng trên ảnh page 1.
 # Chức năng: dùng PicoDet_layout_1x_table để phát hiện bbox có label table.
-# Luồng xử lý: đọc ảnh page 1 → LayoutDetection → lọc bbox table → lưu kết quả và ảnh trực quan.
-# Cấu hình/parameter: dùng CPU, paddle_static, layout_nms=True và các tham số theo use.txt.
+# Luồng xử lý: đọc ảnh → LayoutDetection → sắp xếp bbox table → chọn bảng cần xử lý → lưu kết quả và ảnh trực quan.
+# Cấu hình/parameter: dùng CPU, paddle_static, layout_nms=True; mặc định chỉ lấy 2 bảng đầu, có thể bật bảng thứ 3.
 # Quan hệ: script debug độc lập; chưa phân tích cell, row, column hoặc nội dung bảng.
-# Input/output: nhận ảnh data/image/P_001.png; xuất ảnh/json gốc, ảnh trực quan và crop từng bảng vào output/layout/.
+# Input/output: nhận toàn bộ ảnh trong data/image/; xuất ảnh trực quan vào output/layout/image/ và crop từng bảng vào output/layout/crops/.
 # Contract: mỗi bbox table có label, score và coordinate dạng [xmin, ymin, xmax, ymax].
 
 
 class Page1TableAnalyzer:
     """Phân tích và trực quan hóa các vùng bảng trên ảnh page 1."""
 
-    def __init__(self, output_dir=Path("./output/layout")):
+    def __init__(self, output_dir=Path("./output/layout"), include_third_table=False):
         self.output_dir = Path(output_dir)
+        self.include_third_table = include_third_table
         self.layout_detector = LayoutDetection(
             model_name="PicoDet_layout_1x_table",
             device="cpu",
@@ -26,7 +27,7 @@ class Page1TableAnalyzer:
         )
 
     def detect_tables(self, image_path):
-        """Nhận diện các bbox table và lưu kết quả debug trực quan."""
+        """Nhận diện và lưu các bbox table được chọn để debug."""
         image_path = Path(image_path)
         image = cv2.imread(str(image_path))
         results = self.layout_detector.predict(
@@ -34,22 +35,35 @@ class Page1TableAnalyzer:
             batch_size=1,
             layout_nms=True,
         )
-        table_boxes = []
+        detected_table_boxes = []
 
         for result in results:
             result.print()
             result.save_to_img(str(self.output_dir / "image"))
-            table_boxes.extend(
-                box for box in result["boxes"] if box["label"] == "table"
+            detected_table_boxes.extend(
+                box
+                for box in result["boxes"]
+                if box["label"].lower() == "table"
             )
 
+        detected_table_boxes.sort(
+            key=lambda box: (box["coordinate"][1], box["coordinate"][0])
+        )
+        table_boxes = (
+            detected_table_boxes
+            if self.include_third_table
+            else detected_table_boxes[:2]
+        )
         visual_image = self._draw_tables(image, table_boxes)
-        visual_path = self.output_dir / "visual" / f"{image_path.stem}_tables.png"
+        visual_path = self.output_dir / "image" / f"{image_path.stem}_tables.png"
         visual_path.parent.mkdir(parents=True, exist_ok=True)
         cv2.imwrite(str(visual_path), visual_image)
         self._save_table_crops(image, image_path, table_boxes)
 
-        print(f"Tìm thấy {len(table_boxes)} bảng")
+        print(
+            f"Model nhận diện {len(detected_table_boxes)} bảng, "
+            f"đang xuất {len(table_boxes)} bảng"
+        )
         print(f"Ảnh trực quan: {visual_path}")
         return table_boxes
 
@@ -75,40 +89,15 @@ class Page1TableAnalyzer:
             x_min, y_min, x_max, y_max = map(int, box["coordinate"])
             color = colors[(index - 1) % len(colors)]
             label = f"TABLE {index:02d} | {box['score']:.3f}"
-            text_size, baseline = cv2.getTextSize(
-                label,
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                2,
-            )
+            text_size, baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
             label_top = max(y_min - text_size[1] - baseline - 6, 0)
             label_bottom = label_top + text_size[1] + baseline + 6
             label_right = x_min + text_size[0] + 10
 
-            cv2.rectangle(
-                visual_image,
-                (x_min, y_min),
-                (x_max, y_max),
-                color,
-                3,
-            )
-            cv2.rectangle(
-                visual_image,
-                (x_min, label_top),
-                (label_right, label_bottom),
-                color,
-                -1,
-            )
-            cv2.putText(
-                visual_image,
-                label,
-                (x_min + 5, label_bottom - baseline - 3),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
+            cv2.rectangle(visual_image,(x_min, y_min), (x_max, y_max), color,3)
+            cv2.rectangle(visual_image, (x_min, label_top), (label_right, label_bottom), color, -1)
+            cv2.putText(visual_image,label,(x_min + 5, label_bottom - baseline - 3),cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,(255, 255, 255),2,cv2.LINE_AA)
 
         return visual_image
 
@@ -130,5 +119,16 @@ class Page1TableAnalyzer:
 
 
 if __name__ == "__main__":
-    analyzer = Page1TableAnalyzer()
-    analyzer.detect_tables("./data/image/P_001.png")
+    analyzer = Page1TableAnalyzer(
+        include_third_table=False,
+    )
+    input_dir = Path("./data/image")
+    image_files = sorted(
+        path
+        for path in input_dir.iterdir()
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    )
+
+    for index, image_path in enumerate(image_files, start=1):
+        print(f"[{index}/{len(image_files)}] Đang xử lý: {image_path.name}")
+        analyzer.detect_tables(image_path)
