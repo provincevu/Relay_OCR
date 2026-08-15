@@ -357,7 +357,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         )
         label_match = version_label.search(joined_text)
         if not label_match:
-            return [joined_text]
+            return [{"text": joined_text, "kind": "normal"}]
 
         before_label = joined_text[:label_match.start()].strip()
         version_label_text = joined_text[
@@ -367,10 +367,18 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         value_match = version_value.search(after_label)
 
         if not value_match:
-            version_field = " ".join(
-                part for part in [version_label_text, after_label] if part
-            )
-            return [before_label, version_field] if before_label else [version_field]
+            if before_label:
+                primary = " ".join(
+                    part for part in [before_label, after_label] if part
+                )
+                return [
+                    {"text": primary, "kind": "primary"},
+                    {"text": version_label_text, "kind": "version"},
+                ]
+            return [
+                {"text": after_label, "kind": "append"},
+                {"text": version_label_text, "kind": "version"},
+            ]
 
         text_before_value = after_label[:value_match.start()].strip()
         text_after_value = after_label[value_match.end():].strip()
@@ -386,7 +394,11 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         primary = " ".join(
             part for part in [before_label, text_after_value] if part
         )
-        return [primary, version_field] if primary else [version_field]
+        fields = []
+        if primary:
+            fields.append({"text": primary, "kind": "primary"})
+        fields.append({"text": version_field, "kind": "version"})
+        return fields
 
     def _build_normalized_table(self, cells):
         """Tạo bảng ngoài 7x2 và giữ field bổ sung trong cell phải."""
@@ -397,14 +409,20 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             left_cell = row[0]
             right_fields = []
             for cell in row[1:]:
-                right_fields.extend(self._split_cell_fields(cell))
+                for field in self._split_cell_fields(cell):
+                    if field["kind"] == "append" and right_fields:
+                        right_fields[-1]["text"] = " ".join(
+                            [right_fields[-1]["text"], field["text"]]
+                        ).strip()
+                    else:
+                        right_fields.append(field)
 
             if not right_fields:
-                right_fields = [""]
+                right_fields = [{"text": "", "kind": "normal"}]
 
             fields_html = "".join(
-                f'<div class="logical-field">{escape(text)}</div>'
-                for text in right_fields
+                f'<div class="logical-field">{escape(field["text"])}</div>'
+                for field in right_fields
             )
             row_html.append(
                 "<tr>"
