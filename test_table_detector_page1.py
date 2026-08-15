@@ -133,7 +133,9 @@ svg {{ width: 100%; height: auto; border: 1px solid #9ca3af; background: #fff; }
 table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
 th, td {{ border: 1px solid #9ca3af; padding: 8px; text-align: left; }}
 th {{ background: #f3f4f6; }}
-.reconstructed td {{ white-space: pre-wrap; }}
+.normalized-table .physical-cell {{ vertical-align: top; white-space: pre-wrap; }}
+.logical-fields {{ display: flex; gap: 8px; }}
+.logical-field {{ flex: 1; padding: 4px 8px; border-left: 1px dashed #9ca3af; }}
 pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
 </style>
 </head>
@@ -166,10 +168,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             cell_result["boxes"],
             text_regions,
         )
-        reconstructed_html = self._fill_structure(
-            structure_result["structure"],
-            cells,
-        )
+        normalized_table_html = self._build_normalized_table(cells)
         html_section = self._build_html_section(
             image_name=image_name,
             table_index=table_index,
@@ -179,7 +178,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             text_regions=text_regions,
             unassigned_texts=unassigned_texts,
             structure_score=structure_result["structure_score"],
-            reconstructed_html=reconstructed_html,
+            normalized_table_html=normalized_table_html,
         )
         self.html_sections.append(html_section)
 
@@ -261,6 +260,14 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
 
     def _sort_boxes_left_to_right(self, boxes):
         """Sắp xếp bbox theo từng hàng, trái sang phải trong mỗi hàng."""
+        return [
+            box
+            for row in self._group_boxes_into_rows(boxes)
+            for box in row
+        ]
+
+    def _group_boxes_into_rows(self, boxes):
+        """Gom bbox theo hàng và sắp xếp trái sang phải trong từng hàng."""
         if not boxes:
             return []
 
@@ -297,16 +304,19 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             else:
                 rows.append({"top": item["top"], "items": [item]})
 
-        ordered_boxes = []
+        ordered_rows = []
         for row in sorted(rows, key=lambda value: value["top"]):
-            ordered_boxes.extend(
-                item["box"] for item in sorted(
-                    row["items"],
-                    key=lambda value: value["left"],
-                )
+            ordered_rows.append(
+                [
+                    item["box"]
+                    for item in sorted(
+                        row["items"],
+                        key=lambda value: value["left"],
+                    )
+                ]
             )
 
-        return ordered_boxes
+        return ordered_rows
 
     def _sort_text_regions_left_to_right(self, text_regions):
         """Sắp xếp các vùng text theo từng hàng, trái sang phải."""
@@ -325,27 +335,58 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         ordered_boxes = self._sort_boxes_left_to_right(text_boxes)
         return [box["text_region"] for box in ordered_boxes]
 
-    def _fill_structure(self, structure_tokens, cells):
-        """Điền text đã nhận dạng vào các thẻ cell của cấu trúc HTML."""
-        html_parts = []
-        cell_index = 0
+    def _split_cell_fields(self, cell):
+        """Tách field Phiên bản nằm chung trong một cell vật lý."""
+        if not cell["text_regions"]:
+            return [cell["text"]]
 
-        for token in structure_tokens:
-            if token in {"<html>", "</html>", "<body>", "</body>"}:
-                continue
+        fields = []
+        current_field = []
+        for region in cell["text_regions"]:
+            text = region["text"].strip()
+            if "phiên bản" in text.lower() and current_field:
+                fields.append(" ".join(current_field))
+                current_field = []
+            current_field.append(text)
 
-            if token == "</td>":
-                if cell_index < len(cells):
-                    html_parts.append(escape(cells[cell_index]["text"]))
-                cell_index += 1
-            elif token.startswith("<td") and token.endswith("</td>"):
-                text = escape(cells[cell_index]["text"]) if cell_index < len(cells) else ""
-                token = token[:-5] + text + "</td>"
-                cell_index += 1
+        if current_field:
+            fields.append(" ".join(current_field))
 
-            html_parts.append(token)
+        return fields
 
-        return "".join(html_parts)
+    def _build_normalized_table(self, cells):
+        """Tạo bảng ngoài 7x2 và giữ field bổ sung trong cell phải."""
+        rows = self._group_boxes_into_rows(cells)
+        row_html = []
+
+        for row in rows:
+            left_cell = row[0]
+            right_fields = []
+            for cell in row[1:]:
+                right_fields.extend(self._split_cell_fields(cell))
+
+            if not right_fields:
+                right_fields = [""]
+
+            fields_html = "".join(
+                f'<div class="logical-field">{escape(text)}</div>'
+                for text in right_fields
+            )
+            row_html.append(
+                "<tr>"
+                f'<td class="physical-cell">{escape(left_cell["text"])}</td>'
+                '<td class="physical-cell">'
+                f'<div class="logical-fields">{fields_html}</div>'
+                "</td>"
+                "</tr>"
+            )
+
+        return (
+            '<table class="normalized-table">'
+            "<thead><tr><th>Cột vật lý 01</th><th>Cột vật lý 02</th></tr></thead>"
+            f'<tbody>{"".join(row_html)}</tbody>'
+            "</table>"
+        )
 
     def _build_html_section(
         self,
@@ -357,7 +398,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         text_regions,
         unassigned_texts,
         structure_score,
-        reconstructed_html,
+        normalized_table_html,
     ):
         """Tạo section HTML trực quan cho một bảng."""
         height, width = crop.shape[:2]
@@ -416,8 +457,9 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
 <tbody>{"".join(cell_rows)}</tbody>
 </table>
 <p><strong>Text chưa gán vào cell:</strong> {unassigned_html}</p>
-<h3>Bảng tái dựng</h3>
-<div class="reconstructed">{reconstructed_html}</div>
+<h3>Bảng chuẩn hóa: 7 hàng × 2 cột vật lý</h3>
+<p>Field bổ sung như “Phiên bản” được giữ bên trong cột phải dưới dạng field logic.</p>
+{normalized_table_html}
 </section>
 """
 
