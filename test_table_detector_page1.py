@@ -1,4 +1,5 @@
 import base64
+import re
 from html import escape
 from pathlib import Path
 
@@ -336,23 +337,56 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         return [box["text_region"] for box in ordered_boxes]
 
     def _split_cell_fields(self, cell):
-        """Tách field Phiên bản nằm chung trong một cell vật lý."""
-        if not cell["text_regions"]:
-            return [cell["text"]]
+        """Tách phiên bản và giữ lại text không hợp lệ trong field liên quan."""
+        texts = [
+            region["text"].strip()
+            for region in cell["text_regions"]
+            if region["text"].strip()
+        ]
+        if not texts and cell["text"].strip():
+            texts = [cell["text"].strip()]
+        joined_text = " ".join(texts)
 
-        fields = []
-        current_field = []
-        for region in cell["text_regions"]:
-            text = region["text"].strip()
-            if "phiên bản" in text.lower() and current_field:
-                fields.append(" ".join(current_field))
-                current_field = []
-            current_field.append(text)
+        version_label = re.compile(
+            r"phiên\s+bản(?:\s+rơ[- ]?le)?\s*:?",
+            re.IGNORECASE,
+        )
+        version_value = re.compile(
+            r"\bV?\s*\d+(?:[.,]\d+)*\b",
+            re.IGNORECASE,
+        )
+        label_match = version_label.search(joined_text)
+        if not label_match:
+            return [joined_text]
 
-        if current_field:
-            fields.append(" ".join(current_field))
+        before_label = joined_text[:label_match.start()].strip()
+        version_label_text = joined_text[
+            label_match.start():label_match.end()
+        ].strip()
+        after_label = joined_text[label_match.end():].strip()
+        value_match = version_value.search(after_label)
 
-        return fields
+        if not value_match:
+            version_field = " ".join(
+                part for part in [version_label_text, after_label] if part
+            )
+            return [before_label, version_field] if before_label else [version_field]
+
+        text_before_value = after_label[:value_match.start()].strip()
+        text_after_value = after_label[value_match.end():].strip()
+        version_field = " ".join(
+            part
+            for part in [
+                version_label_text,
+                text_before_value,
+                value_match.group(0).replace(" ", ""),
+            ]
+            if part
+        )
+        primary = " ".join(
+            part for part in [before_label, text_after_value] if part
+        )
+        return [primary, version_field] if primary else [version_field]
 
     def _build_normalized_table(self, cells):
         """Tạo bảng ngoài 7x2 và giữ field bổ sung trong cell phải."""
