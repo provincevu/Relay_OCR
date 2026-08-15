@@ -1,0 +1,521 @@
+import base64
+from html import escape
+from pathlib import Path
+
+import cv2
+import numpy as np
+from paddleocr import (
+    LayoutDetection,
+    TableCellsDetection,
+    TableStructureRecognition,
+)
+
+from scr.services.detector import Detector
+from scr.services.recognitor import Recognitor
+
+# Mục đích: debug nhận diện và trích xuất nội dung TABLE 01, TABLE 02 trên page 1.
+# Chức năng: nhận diện bảng, cấu trúc, cell và text; xuất một file HTML trực quan.
+# Luồng xử lý: ảnh → table bbox → crop → structure/cell → Detector → Recognitor → HTML.
+# Cấu hình/parameter: dùng CPU; mặc định chỉ lấy TABLE 01, có thể bật TABLE 02.
+# Quan hệ: dùng các model bảng wired của PaddleOCR và Detector/Recognitor hiện có.
+# Input/output: đọc toàn bộ data/image/; ghi ảnh debug, crop và output/layout/table_analysis.html.
+# Contract: detect_tables() vẫn trả danh sách bbox table có coordinate [xmin, ymin, xmax, ymax].
+
+
+class Page1TableAnalyzer:
+    """Phân tích và trực quan hóa các bảng trên ảnh page 1."""
+
+    def __init__(
+        self,
+        output_dir=Path("./output/layout"),
+        include_second_table=False,
+        include_third_table=False,
+    ):
+        self.output_dir = Path(output_dir)
+        self.include_second_table = include_second_table
+        self.include_third_table = include_third_table
+        self.html_sections = []
+        self.layout_detector = LayoutDetection(
+            model_name="PicoDet_layout_1x_table",
+            device="cpu",
+            engine="paddle_static",
+            enable_mkldnn=False,
+            cpu_threads=2,
+        )
+        self.structure_model = TableStructureRecognition(
+            model_name="SLANeXt_wired",
+            device="cpu",
+            engine="paddle_static",
+            enable_mkldnn=False,
+            cpu_threads=2,
+        )
+        self.cell_model = TableCellsDetection(
+            model_name="RT-DETR-L_wired_table_cell_det",
+            device="cpu",
+            engine="paddle_static",
+            enable_mkldnn=False,
+            cpu_threads=2,
+        )
+        self.text_detector = Detector({})
+        self.text_recognizer = Recognitor({})
+
+    def detect_tables(self, image_path):
+        """Nhận diện, trích xuất và lưu các bảng được chọn để debug."""
+        image_path = Path(image_path)
+        image = cv2.imread(str(image_path))
+        results = self.layout_detector.predict(
+            str(image_path),
+            batch_size=1,
+            layout_nms=True,
+        )
+        detected_table_boxes = []
+
+        for result in results:
+            result.print()
+            result.save_to_img(str(self.output_dir / "image"))
+            detected_table_boxes.extend(
+                box
+                for box in result["boxes"]
+                if box["label"].lower() == "table"
+            )
+
+        detected_table_boxes = self._sort_boxes_left_to_right(
+            detected_table_boxes
+        )
+        if self.include_third_table:
+            table_boxes = detected_table_boxes
+        elif self.include_second_table:
+            table_boxes = detected_table_boxes[:2]
+        else:
+            table_boxes = detected_table_boxes[:1]
+        visual_image = self._draw_tables(image, table_boxes)
+        visual_path = self.output_dir / "image" / f"{image_path.stem}_tables.png"
+        visual_path.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(visual_path), visual_image)
+        table_crops = self._save_table_crops(image, image_path, table_boxes)
+
+        for table_index, crop_path, crop in table_crops:
+            self._analyze_table(
+                image_name=image_path.stem,
+                table_index=table_index,
+                crop_path=crop_path,
+                crop=crop,
+            )
+
+        print(
+            f"Model nhận diện {len(detected_table_boxes)} bảng, "
+            f"đang xuất {len(table_boxes)} bảng"
+        )
+        print(f"Ảnh trực quan: {visual_path}")
+        return table_boxes
+
+    def save_html(self):
+        """Lưu một file HTML chứa toàn bộ kết quả trực quan và text đã trích xuất."""
+        output_path = self.output_dir / "table_analysis.html"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sections = "\n".join(self.html_sections)
+        html = f"""<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Phân tích TABLE 01 và TABLE 02</title>
+<style>
+body {{ font-family: Arial, sans-serif; margin: 24px; color: #1f2937; }}
+h1 {{ margin-bottom: 8px; }}
+section {{ margin: 32px 0 48px; border-top: 2px solid #d1d5db; padding-top: 20px; }}
+svg {{ width: 100%; height: auto; border: 1px solid #9ca3af; background: #fff; }}
+.cell-box {{ fill: rgba(34, 197, 94, 0.12); stroke: #16a34a; stroke-width: 2; }}
+.text-box {{ fill: none; stroke: #2563eb; stroke-width: 1.5; }}
+.cell-label {{ fill: #b91c1c; font-size: 18px; font-weight: bold; }}
+.legend span {{ margin-right: 24px; }}
+.green {{ color: #16a34a; }}
+.blue {{ color: #2563eb; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 16px; }}
+th, td {{ border: 1px solid #9ca3af; padding: 8px; text-align: left; }}
+th {{ background: #f3f4f6; }}
+.reconstructed td {{ white-space: pre-wrap; }}
+pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
+</style>
+</head>
+<body>
+<h1>Phân tích TABLE 01 và TABLE 02</h1>
+<p class="legend">
+<span class="green">Màu xanh lá: cell</span>
+<span class="blue">Màu xanh dương: vùng text</span>
+</p>
+{sections}
+</body>
+</html>
+"""
+        output_path.write_text(html, encoding="utf-8")
+        print(f"HTML trực quan: {output_path}")
+
+    def _analyze_table(self, image_name, table_index, crop_path, crop):
+        """Nhận diện structure, cell và text của một ảnh crop bảng."""
+        structure_result = self.structure_model.predict(
+            input=crop,
+            batch_size=1,
+        )[0]
+        cell_result = self.cell_model.predict(
+            crop,
+            threshold=0.3,
+            batch_size=1,
+        )[0]
+        text_regions = self._recognize_text(crop)
+        cells, unassigned_texts = self._assign_text_to_cells(
+            cell_result["boxes"],
+            text_regions,
+        )
+        reconstructed_html = self._fill_structure(
+            structure_result["structure"],
+            cells,
+        )
+        html_section = self._build_html_section(
+            image_name=image_name,
+            table_index=table_index,
+            crop_path=crop_path,
+            crop=crop,
+            cells=cells,
+            text_regions=text_regions,
+            unassigned_texts=unassigned_texts,
+            structure_score=structure_result["structure_score"],
+            reconstructed_html=reconstructed_html,
+        )
+        self.html_sections.append(html_section)
+
+    def _recognize_text(self, image):
+        """Dùng Detector và Recognitor hiện có để nhận dạng các vùng text."""
+        text_regions = []
+        height, width = image.shape[:2]
+        detection_results = self.text_detector.detect(image)
+
+        for result in detection_results:
+            for polygon in result["dt_polys"]:
+                polygon = np.array(polygon, dtype=np.float32)
+                x_min, y_min = polygon.min(axis=0).astype(int)
+                x_max, y_max = polygon.max(axis=0).astype(int)
+                x_min = max(x_min, 0)
+                y_min = max(y_min, 0)
+                x_max = min(x_max, width)
+                y_max = min(y_max, height)
+                text_crop = image[y_min:y_max, x_min:x_max]
+                text = self.text_recognizer.recognize(text_crop)
+                center_x = float(polygon[:, 0].mean())
+                center_y = float(polygon[:, 1].mean())
+                text_regions.append(
+                    {
+                        "polygon": polygon.tolist(),
+                        "center": [center_x, center_y],
+                        "text": text,
+                    }
+                )
+
+        return text_regions
+
+    def _assign_text_to_cells(self, cell_boxes, text_regions):
+        """Gán text vào cell chứa tâm của polygon text."""
+        sorted_boxes = self._sort_boxes_left_to_right(cell_boxes)
+        cells = []
+
+        for index, box in enumerate(sorted_boxes, start=1):
+            cells.append(
+                {
+                    "index": index,
+                    "coordinate": [float(value) for value in box["coordinate"]],
+                    "score": float(box["score"]),
+                    "text_regions": [],
+                }
+            )
+
+        unassigned_texts = []
+        for text_region in text_regions:
+            center_x, center_y = text_region["center"]
+            matched_cells = [
+                cell
+                for cell in cells
+                if cell["coordinate"][0] <= center_x <= cell["coordinate"][2]
+                and cell["coordinate"][1] <= center_y <= cell["coordinate"][3]
+            ]
+
+            if matched_cells:
+                matched_cell = min(
+                    matched_cells,
+                    key=lambda cell: (
+                        cell["coordinate"][2] - cell["coordinate"][0]
+                    )
+                    * (cell["coordinate"][3] - cell["coordinate"][1]),
+                )
+                matched_cell["text_regions"].append(text_region)
+            else:
+                unassigned_texts.append(text_region)
+
+        for cell in cells:
+            cell["text_regions"] = self._sort_text_regions_left_to_right(
+                cell["text_regions"]
+            )
+            cell["text"] = " ".join(
+                region["text"] for region in cell["text_regions"]
+            )
+
+        return cells, unassigned_texts
+
+    def _sort_boxes_left_to_right(self, boxes):
+        """Sắp xếp bbox theo từng hàng, trái sang phải trong mỗi hàng."""
+        if not boxes:
+            return []
+
+        box_items = []
+        heights = []
+        for box in boxes:
+            x_min, y_min, x_max, y_max = map(float, box["coordinate"])
+            box_items.append(
+                {
+                    "box": box,
+                    "top": y_min,
+                    "left": x_min,
+                }
+            )
+            heights.append(y_max - y_min)
+
+        row_tolerance = max(8.0, float(np.median(heights)) * 0.5)
+        rows = []
+        for item in sorted(box_items, key=lambda value: value["top"]):
+            matched_rows = [
+                row
+                for row in rows
+                if abs(item["top"] - row["top"]) <= row_tolerance
+            ]
+            if matched_rows:
+                row = min(
+                    matched_rows,
+                    key=lambda value: abs(item["top"] - value["top"]),
+                )
+                row["items"].append(item)
+                row["top"] = sum(
+                    value["top"] for value in row["items"]
+                ) / len(row["items"])
+            else:
+                rows.append({"top": item["top"], "items": [item]})
+
+        ordered_boxes = []
+        for row in sorted(rows, key=lambda value: value["top"]):
+            ordered_boxes.extend(
+                item["box"] for item in sorted(
+                    row["items"],
+                    key=lambda value: value["left"],
+                )
+            )
+
+        return ordered_boxes
+
+    def _sort_text_regions_left_to_right(self, text_regions):
+        """Sắp xếp các vùng text theo từng hàng, trái sang phải."""
+        text_boxes = []
+        for text_region in text_regions:
+            polygon = np.array(text_region["polygon"], dtype=np.float32)
+            x_min, y_min = polygon.min(axis=0)
+            x_max, y_max = polygon.max(axis=0)
+            text_boxes.append(
+                {
+                    "coordinate": [x_min, y_min, x_max, y_max],
+                    "text_region": text_region,
+                }
+            )
+
+        ordered_boxes = self._sort_boxes_left_to_right(text_boxes)
+        return [box["text_region"] for box in ordered_boxes]
+
+    def _fill_structure(self, structure_tokens, cells):
+        """Điền text đã nhận dạng vào các thẻ cell của cấu trúc HTML."""
+        html_parts = []
+        cell_index = 0
+
+        for token in structure_tokens:
+            if token in {"<html>", "</html>", "<body>", "</body>"}:
+                continue
+
+            if token == "</td>":
+                if cell_index < len(cells):
+                    html_parts.append(escape(cells[cell_index]["text"]))
+                cell_index += 1
+            elif token.startswith("<td") and token.endswith("</td>"):
+                text = escape(cells[cell_index]["text"]) if cell_index < len(cells) else ""
+                token = token[:-5] + text + "</td>"
+                cell_index += 1
+
+            html_parts.append(token)
+
+        return "".join(html_parts)
+
+    def _build_html_section(
+        self,
+        image_name,
+        table_index,
+        crop_path,
+        crop,
+        cells,
+        text_regions,
+        unassigned_texts,
+        structure_score,
+        reconstructed_html,
+    ):
+        """Tạo section HTML trực quan cho một bảng."""
+        height, width = crop.shape[:2]
+        image_buffer = cv2.imencode(".png", crop)[1]
+        image_data = base64.b64encode(image_buffer).decode("ascii")
+
+        cell_shapes = []
+        for cell in cells:
+            x_min, y_min, x_max, y_max = cell["coordinate"]
+            cell_shapes.append(
+                f'<rect class="cell-box" x="{x_min}" y="{y_min}" '
+                f'width="{x_max - x_min}" height="{y_max - y_min}" />'
+            )
+            cell_shapes.append(
+                f'<text class="cell-label" x="{x_min + 4}" y="{y_min + 20}">'
+                f'C{cell["index"]:02d}</text>'
+            )
+
+        text_shapes = []
+        for text_region in text_regions:
+            points = " ".join(
+                f"{point[0]},{point[1]}" for point in text_region["polygon"]
+            )
+            text_shapes.append(f'<polygon class="text-box" points="{points}" />')
+
+        cell_rows = []
+        for cell in cells:
+            coordinate = ", ".join(
+                f"{value:.1f}" for value in cell["coordinate"]
+            )
+            cell_rows.append(
+                "<tr>"
+                f'<td>C{cell["index"]:02d}</td>'
+                f"<td>{coordinate}</td>"
+                f'<td>{cell["score"]:.3f}</td>'
+                f'<td>{escape(cell["text"])}</td>'
+                "</tr>"
+            )
+
+        unassigned_html = " ".join(
+            escape(region["text"]) for region in unassigned_texts
+        )
+        return f"""
+<section>
+<h2>{escape(image_name)} - TABLE {table_index:02d}</h2>
+<p>Crop: {escape(str(crop_path))}</p>
+<p>Structure score: {float(structure_score):.4f}</p>
+<svg viewBox="0 0 {width} {height}" aria-label="Kết quả detection">
+<image href="data:image/png;base64,{image_data}" width="{width}" height="{height}" />
+{"".join(cell_shapes)}
+{"".join(text_shapes)}
+</svg>
+<h3>Thông tin theo cell</h3>
+<table>
+<thead><tr><th>Cell</th><th>Bounding box</th><th>Score</th><th>Text</th></tr></thead>
+<tbody>{"".join(cell_rows)}</tbody>
+</table>
+<p><strong>Text chưa gán vào cell:</strong> {unassigned_html}</p>
+<h3>Bảng tái dựng</h3>
+<div class="reconstructed">{reconstructed_html}</div>
+</section>
+"""
+
+    def _draw_tables(self, image, table_boxes):
+        """Vẽ bbox, nhãn score và nền tô mờ lên ảnh debug."""
+        visual_image = image.copy()
+        overlay = visual_image.copy()
+        colors = [
+            (0, 180, 0),
+            (255, 140, 0),
+            (180, 0, 180),
+            (0, 140, 255),
+        ]
+
+        for index, box in enumerate(table_boxes):
+            x_min, y_min, x_max, y_max = map(int, box["coordinate"])
+            color = colors[index % len(colors)]
+            cv2.rectangle(overlay, (x_min, y_min), (x_max, y_max), color, -1)
+
+        visual_image = cv2.addWeighted(overlay, 0.16, visual_image, 0.84, 0)
+
+        for index, box in enumerate(table_boxes, start=1):
+            x_min, y_min, x_max, y_max = map(int, box["coordinate"])
+            color = colors[(index - 1) % len(colors)]
+            label = f"TABLE {index:02d} | {box['score']:.3f}"
+            text_size, baseline = cv2.getTextSize(
+                label,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                2,
+            )
+            label_top = max(y_min - text_size[1] - baseline - 6, 0)
+            label_bottom = label_top + text_size[1] + baseline + 6
+            label_right = x_min + text_size[0] + 10
+
+            cv2.rectangle(
+                visual_image,
+                (x_min, y_min),
+                (x_max, y_max),
+                color,
+                3,
+            )
+            cv2.rectangle(
+                visual_image,
+                (x_min, label_top),
+                (label_right, label_bottom),
+                color,
+                -1,
+            )
+            cv2.putText(
+                visual_image,
+                label,
+                (x_min + 5, label_bottom - baseline - 3),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        return visual_image
+
+    def _save_table_crops(self, image, image_path, table_boxes):
+        """Lưu và trả các crop table để tiếp tục phân tích."""
+        crop_dir = self.output_dir / "crops" / image_path.stem
+        crop_dir.mkdir(parents=True, exist_ok=True)
+        table_crops = []
+        height, width = image.shape[:2]
+
+        for index, box in enumerate(table_boxes, start=1):
+            x_min, y_min, x_max, y_max = map(int, box["coordinate"])
+            x_min = max(x_min, 0)
+            y_min = max(y_min, 0)
+            x_max = min(x_max, width)
+            y_max = min(y_max, height)
+            crop = image[y_min:y_max, x_min:x_max]
+            crop_path = crop_dir / f"table_{index:02d}.png"
+            cv2.imwrite(str(crop_path), crop)
+            table_crops.append((index, crop_path, crop))
+
+        return table_crops
+
+
+if __name__ == "__main__":
+    analyzer = Page1TableAnalyzer(
+        include_second_table=False,
+        include_third_table=False,
+    )
+    input_dir = Path("./data/image")
+    image_files = sorted(
+        path
+        for path in input_dir.iterdir()
+        if path.suffix.lower()
+        in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    )
+
+    for index, image_path in enumerate(image_files, start=1):
+        print(f"[{index}/{len(image_files)}] Đang xử lý: {image_path.name}")
+        analyzer.detect_tables(image_path)
+
+    analyzer.save_html()
