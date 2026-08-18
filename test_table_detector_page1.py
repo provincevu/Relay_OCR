@@ -1,4 +1,5 @@
 import base64
+import json
 import re
 from html import escape
 from pathlib import Path
@@ -19,7 +20,7 @@ from scr.services.recognitor import Recognitor
 # Luồng xử lý: ảnh → table bbox → crop → structure/cell → Detector → Recognitor → HTML.
 # Cấu hình/parameter: dùng CPU; mặc định chỉ lấy TABLE 01, có thể bật TABLE 02.
 # Quan hệ: dùng các model bảng wired của PaddleOCR và Detector/Recognitor hiện có.
-# Input/output: đọc data/image/; ghi ảnh debug, crop, HTML và report cảnh báo.
+# Input/output: đọc ảnh/config; ghi ảnh debug, crop, HTML, report và JSON dữ liệu.
 # Contract: detect_tables() vẫn trả danh sách bbox table có coordinate [xmin, ymin, xmax, ymax].
 
 
@@ -50,6 +51,11 @@ class Page1TableAnalyzer:
         self.html_sections = []
         self.table_warnings = []
         self.report_lines = []
+        field_config_path = Path("./config/table_01_fields.json")
+        field_config = json.loads(field_config_path.read_text(encoding="utf-8"))
+        self.field_definitions = field_config["fields"]
+        self.extracted_tables = []
+        self.field_review = []
         self.layout_detector = LayoutDetection(
             model_name="PicoDet_layout_1x_table",
             device="cpu",
@@ -123,7 +129,9 @@ class Page1TableAnalyzer:
         for table_index, crop_path, crop in table_crops:
             self._analyze_table(
                 image_name=image_path.stem,
+                source_image=image_path.name,
                 table_index=table_index,
+                table_score=float(table_boxes[table_index - 1]["score"]),
                 crop_path=crop_path,
                 crop=crop,
             )
@@ -191,7 +199,31 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
 
         print(f"Report: {output_path}")
 
-    def _analyze_table(self, image_name, table_index, crop_path, crop):
+    def save_extracted_data(self):
+        """Lưu dữ liệu trích xuất và các field cần xem lại vào JSON."""
+        data_path = self.output_dir / "table_01_data.json"
+        review_path = self.output_dir / "table_01_review.json"
+        data_path.parent.mkdir(parents=True, exist_ok=True)
+        data_path.write_text(
+            json.dumps(self.extracted_tables, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        review_path.write_text(
+            json.dumps(self.field_review, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"Dữ liệu TABLE 01: {data_path}")
+        print(f"Field cần xem lại: {review_path}")
+
+    def _analyze_table(
+        self,
+        image_name,
+        source_image,
+        table_index,
+        table_score,
+        crop_path,
+        crop,
+    ):
         """Nhận diện structure, cell và text của một ảnh crop bảng."""
         structure_result = self.structure_model.predict(
             input=crop,
@@ -228,6 +260,12 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             valid_cell_boxes,
             text_regions,
         )
+        if table_index == 1:
+            self._extract_table_fields(
+                source_image=source_image,
+                table_score=table_score,
+                cells=cells,
+            )
         normalized_table_html = self._build_normalized_table(cells)
         html_section = self._build_html_section(
             image_name=image_name,
@@ -241,6 +279,214 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             normalized_table_html=normalized_table_html,
         )
         self.html_sections.append(html_section)
+
+    def _extract_table_fields(self, source_image, table_score, cells):
+        """Trích xuất 16 field của TABLE 01 từ text trong các cell hợp lệ."""
+        extracted_data = {
+            field["key"]: None
+            for field in self.field_definitions
+        }
+        field_details = {}
+        rows = self._group_boxes_into_rows(cells)
+
+        for row in rows:
+            parsed_cells = []
+            row_context_keys = set()
+
+            for cell in row:
+                matches = self._find_field_matches(cell["text"])
+                parsed_cells.append((cell, matches))
+
+                for match in matches:
+                    candidate_keys = {
+                        candidate["field"]["key"]
+                        for candidate in match["candidates"]
+                    }
+                    if len(candidate_keys) == 1:
+                        row_context_keys.update(candidate_keys)
+
+            for cell, matches in parsed_cells:
+                cell_context_keys = set()
+                for match in matches:
+                    candidate_keys = {
+                        candidate["field"]["key"]
+                        for candidate in match["candidates"]
+                    }
+                    if len(candidate_keys) == 1:
+                        cell_context_keys.update(candidate_keys)
+
+                for match_index, match in enumerate(matches):
+                    selected_candidate = self._resolve_field_candidate(
+                        match,
+                        cell_context_keys,
+                        row_context_keys,
+                    )
+                    value = self._extract_field_value(
+                        cell["text"],
+                        matches,
+                        match_index,
+                    )
+
+                    if selected_candidate is None:
+                        self.field_review.append(
+                            {
+                                "source_image": source_image,
+                                "cell_index": cell["index"],
+                                "detected_field_name": match["matched_text"],
+                                "value": value,
+                                "candidate_keys": [
+                                    candidate["field"]["key"]
+                                    for candidate in match["candidates"]
+                                ],
+                                "muc_do_tin_cay": 1,
+                                "cell_score": cell["score"],
+                                "raw_text": cell["text"],
+                                "reason": "context_khong_xac_dinh",
+                            }
+                        )
+                        continue
+
+                    field_key = selected_candidate["field"]["key"]
+                    extracted_data[field_key] = value
+                    field_details[field_key] = {
+                        "matched_name": selected_candidate["name"],
+                        "detected_field_name": match["matched_text"],
+                        "muc_do_tin_cay": 1,
+                        "cell_index": cell["index"],
+                        "cell_score": cell["score"],
+                        "raw_text": cell["text"],
+                    }
+
+                if not matches and ":" in cell["text"]:
+                    detected_name, value = cell["text"].split(":", 1)
+                    detected_name = self._clean_text(detected_name)
+                    value = self._clean_text(value) or None
+                    if detected_name:
+                        self.field_review.append(
+                            {
+                                "source_image": source_image,
+                                "cell_index": cell["index"],
+                                "detected_field_name": detected_name,
+                                "value": value,
+                                "muc_do_tin_cay": 2,
+                                "cell_score": cell["score"],
+                                "raw_text": cell["text"],
+                                "reason": "khong_khop_names",
+                            }
+                        )
+
+        self.extracted_tables.append(
+            {
+                "source_image": source_image,
+                "table_score": table_score,
+                "data": extracted_data,
+                "field_details": field_details,
+            }
+        )
+
+    def _find_field_matches(self, text):
+        """Tìm field name và giữ match dài nhất tại vùng bị chồng lấn."""
+        candidates = []
+
+        for field in self.field_definitions:
+            for name in field["names"]:
+                name_pattern = r"\s+".join(
+                    re.escape(part)
+                    for part in name.split()
+                )
+                for match in re.finditer(name_pattern, text, re.IGNORECASE):
+                    candidates.append(
+                        {
+                            "start": match.start(),
+                            "end": match.end(),
+                            "matched_text": match.group(0),
+                            "name": name,
+                            "field": field,
+                        }
+                    )
+
+        longest_candidates = []
+        for candidate in candidates:
+            candidate_length = candidate["end"] - candidate["start"]
+            has_longer_overlap = any(
+                other["start"] < candidate["end"]
+                and candidate["start"] < other["end"]
+                and other["end"] - other["start"] > candidate_length
+                for other in candidates
+            )
+            if not has_longer_overlap:
+                longest_candidates.append(candidate)
+
+        grouped_matches = {}
+        for candidate in longest_candidates:
+            match_key = (candidate["start"], candidate["end"])
+            if match_key not in grouped_matches:
+                grouped_matches[match_key] = {
+                    "start": candidate["start"],
+                    "end": candidate["end"],
+                    "matched_text": candidate["matched_text"],
+                    "candidates": [],
+                }
+
+            existing_keys = {
+                item["field"]["key"]
+                for item in grouped_matches[match_key]["candidates"]
+            }
+            if candidate["field"]["key"] not in existing_keys:
+                grouped_matches[match_key]["candidates"].append(candidate)
+
+        return sorted(
+            grouped_matches.values(),
+            key=lambda match: match["start"],
+        )
+
+    def _resolve_field_candidate(
+        self,
+        match,
+        cell_context_keys,
+        row_context_keys,
+    ):
+        """Chọn key duy nhất, ưu tiên context trong cell rồi trong hàng."""
+        if len(match["candidates"]) == 1:
+            return match["candidates"][0]
+
+        cell_candidates = [
+            candidate
+            for candidate in match["candidates"]
+            if set(candidate["field"].get("context_keys", []))
+            & cell_context_keys
+        ]
+        if len(cell_candidates) == 1:
+            return cell_candidates[0]
+
+        row_candidates = [
+            candidate
+            for candidate in match["candidates"]
+            if set(candidate["field"].get("context_keys", []))
+            & row_context_keys
+        ]
+        if len(row_candidates) == 1:
+            return row_candidates[0]
+
+        return None
+
+    def _extract_field_value(self, text, matches, match_index):
+        """Lấy value từ cuối field name đến field name kế tiếp."""
+        match = matches[match_index]
+        value_end = (
+            matches[match_index + 1]["start"]
+            if match_index + 1 < len(matches)
+            else len(text)
+        )
+        value_text = text[match["end"]:value_end]
+        if ":" in value_text:
+            value_text = value_text.split(":", 1)[1]
+
+        return self._clean_text(value_text) or None
+
+    def _clean_text(self, text):
+        """Gom khoảng trắng thừa nhưng giữ nguyên nội dung OCR."""
+        return " ".join(text.split())
 
     def _recognize_text(self, image):
         """Dùng Detector và Recognitor hiện có để nhận dạng các vùng text."""
@@ -677,3 +923,4 @@ if __name__ == "__main__":
 
     analyzer.save_html()
     analyzer.save_report()
+    analyzer.save_extracted_data()
