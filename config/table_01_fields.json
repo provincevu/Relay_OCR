@@ -1,0 +1,107 @@
+{
+  "fields": [
+    {
+      "key": "thiet_bi_duoc_bao_ve",
+      "names": [
+        "Thiết bị được bảo vệ"
+      ]
+    },
+    {
+      "key": "kieu_bao_ve",
+      "names": [
+        "Kiểu bảo vệ"
+      ]
+    },
+    {
+      "key": "may_cat",
+      "names": [
+        "Máy cắt"
+      ]
+    },
+    {
+      "key": "ten_ro_le",
+      "names": [
+        "Tên rơ-le",
+        "Tên rơ le",
+        "Tên role"
+        "Tên ro-le"
+      ]
+    },
+    {
+      "key": "phien_ban_ro_le",
+      "names": [
+        "Phiên bản rơ-le",
+        "Phiên bản rơ le",
+        "Phiên bản role"
+      ]
+    },
+    {
+      "key": "so_do_danh_so",
+      "names": [
+        "Sơ đồ đánh số"
+      ]
+    },
+    {
+      "key": "so_hieu_ro_le",
+      "names": [
+        "Số hiệu rơ-le",
+        "Số hiệu rơ le",
+        "Số hiệu role"
+      ]
+    },
+    {
+      "key": "ty_so_bien_dong_dien",
+      "names": [
+        "Tỷ số biến dòng điện"
+      ]
+    },
+    {
+      "key": "nha_che_tao",
+      "names": [
+        "Nhà chế tạo"
+      ]
+    },
+    {
+      "key": "ty_so_bien_dien_ap",
+      "names": [
+        "Tỷ số biến điện áp"
+      ]
+    },
+    {
+      "key": "nam_lap_dat",
+      "names": [
+        "Năm lắp đặt"
+      ]
+    },
+    {
+      "key": "so_hieu_ban_ve_mot_soi",
+      "names": [
+        "Số hiệu bản vẽ một sợi"
+      ]
+    },
+    {
+      "key": "phan_mem",
+      "names": [
+        "Phần mềm"
+      ]
+    },
+    {
+      "key": "phien_ban_phan_mem",
+      "names": [
+        "Phiên bản phần mềm"
+      ]
+    },
+    {
+      "key": "tu_bao_ve",
+      "names": [
+        "Tủ bảo vệ"
+      ]
+    },
+    {
+      "key": "mach_bao_ve",
+      "names": [
+        "Mạch bảo vệ"
+      ]
+    }
+  ]
+}
