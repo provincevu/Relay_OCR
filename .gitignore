@@ -43,3 +43,7 @@ data/*
 # Agents
 AGENTS.md
 use.txt
+
+# images
+*.png
+*.jpg

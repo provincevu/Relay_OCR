@@ -19,8 +19,12 @@ from scr.services.recognitor import Recognitor
 # Luồng xử lý: ảnh → table bbox → crop → structure/cell → Detector → Recognitor → HTML.
 # Cấu hình/parameter: dùng CPU; mặc định chỉ lấy TABLE 01, có thể bật TABLE 02.
 # Quan hệ: dùng các model bảng wired của PaddleOCR và Detector/Recognitor hiện có.
-# Input/output: đọc toàn bộ data/image/; ghi ảnh debug, crop và output/layout/table_analysis.html.
+# Input/output: đọc data/image/; ghi ảnh debug, crop, HTML và report cảnh báo.
 # Contract: detect_tables() vẫn trả danh sách bbox table có coordinate [xmin, ymin, xmax, ymax].
+
+
+TABLE_SCORE_WARNING_THRESHOLD = 0.8
+CELL_SCORE_THRESHOLD = 0.9
 
 
 class Page1TableAnalyzer:
@@ -31,31 +35,41 @@ class Page1TableAnalyzer:
         output_dir=Path("./output/layout"),
         include_second_table=False,
         include_third_table=False,
+        crop_padding_left=0,
+        crop_padding_top=0,
+        crop_padding_right=0,
+        crop_padding_bottom=0,
     ):
         self.output_dir = Path(output_dir)
         self.include_second_table = include_second_table
         self.include_third_table = include_third_table
+        self.crop_padding_left = crop_padding_left
+        self.crop_padding_top = crop_padding_top
+        self.crop_padding_right = crop_padding_right
+        self.crop_padding_bottom = crop_padding_bottom
         self.html_sections = []
+        self.table_warnings = []
+        self.report_lines = []
         self.layout_detector = LayoutDetection(
             model_name="PicoDet_layout_1x_table",
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,
-            cpu_threads=2,
+            cpu_threads=4,
         )
         self.structure_model = TableStructureRecognition(
             model_name="SLANeXt_wired",
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,
-            cpu_threads=2,
+            cpu_threads=4,
         )
         self.cell_model = TableCellsDetection(
             model_name="RT-DETR-L_wired_table_cell_det",
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,
-            cpu_threads=2,
+            cpu_threads=4,
         )
         self.text_detector = Detector({})
         self.text_recognizer = Recognitor({})
@@ -89,6 +103,17 @@ class Page1TableAnalyzer:
             table_boxes = detected_table_boxes[:2]
         else:
             table_boxes = detected_table_boxes[:1]
+
+        if table_boxes:
+            table_01_score = float(table_boxes[0]["score"])
+            if table_01_score < TABLE_SCORE_WARNING_THRESHOLD:
+                warning = (
+                    f"TABLE 01 score thấp | {image_path.name} | "
+                    f"score={table_01_score:.4f}"
+                )
+                self.table_warnings.append(warning)
+                self.report_lines.append(warning)
+
         visual_image = self._draw_tables(image, table_boxes)
         visual_path = self.output_dir / "image" / f"{image_path.stem}_tables.png"
         visual_path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,7 +132,6 @@ class Page1TableAnalyzer:
             f"Model nhận diện {len(detected_table_boxes)} bảng, "
             f"đang xuất {len(table_boxes)} bảng"
         )
-        print(f"Ảnh trực quan: {visual_path}")
         return table_boxes
 
     def save_html(self):
@@ -153,6 +177,20 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         output_path.write_text(html, encoding="utf-8")
         print(f"HTML trực quan: {output_path}")
 
+    def save_report(self):
+        """Lưu report và in cảnh báo table sau khi hoàn tất toàn bộ ảnh."""
+        output_path = self.output_dir / "report.txt"
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        report_content = "\n".join(self.report_lines)
+        output_path.write_text(report_content, encoding="utf-8")
+
+        if self.table_warnings:
+            print("\nCẢNH BÁO TABLE 01:")
+            for warning in self.table_warnings:
+                print(warning)
+
+        print(f"Report: {output_path}")
+
     def _analyze_table(self, image_name, table_index, crop_path, crop):
         """Nhận diện structure, cell và text của một ảnh crop bảng."""
         structure_result = self.structure_model.predict(
@@ -164,9 +202,30 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             threshold=0.3,
             batch_size=1,
         )[0]
+        sorted_cell_boxes = self._sort_boxes_left_to_right(
+            cell_result["boxes"]
+        )
+        valid_cell_boxes = []
+
+        for cell_index, cell_box in enumerate(sorted_cell_boxes, start=1):
+            cell_score = float(cell_box["score"])
+            if cell_score < CELL_SCORE_THRESHOLD:
+                coordinate = ", ".join(
+                    f"{float(value):.1f}"
+                    for value in cell_box["coordinate"]
+                )
+                self.report_lines.append(
+                    f"CELL bị bỏ qua | {image_name} | TABLE {table_index:02d} | "
+                    f"CELL {cell_index:02d} | score={cell_score:.4f} | "
+                    f"bbox=[{coordinate}]"
+                )
+                continue
+
+            valid_cell_boxes.append(cell_box)
+
         text_regions = self._recognize_text(crop)
         cells, unassigned_texts = self._assign_text_to_cells(
-            cell_result["boxes"],
+            valid_cell_boxes,
             text_regions,
         )
         normalized_table_html = self._build_normalized_table(cells)
@@ -576,19 +635,19 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
 
     def _save_table_crops(self, image, image_path, table_boxes):
         """Lưu và trả các crop table để tiếp tục phân tích."""
-        crop_dir = self.output_dir / "crops" / image_path.stem
+        crop_dir = self.output_dir / "crops"
         crop_dir.mkdir(parents=True, exist_ok=True)
         table_crops = []
         height, width = image.shape[:2]
 
         for index, box in enumerate(table_boxes, start=1):
             x_min, y_min, x_max, y_max = map(int, box["coordinate"])
-            x_min = max(x_min, 0)
-            y_min = max(y_min, 0)
-            x_max = min(x_max, width)
-            y_max = min(y_max, height)
+            x_min = max(x_min - self.crop_padding_left, 0)
+            y_min = max(y_min - self.crop_padding_top, 0)
+            x_max = min(x_max + self.crop_padding_right, width)
+            y_max = min(y_max + self.crop_padding_bottom, height)
             crop = image[y_min:y_max, x_min:x_max]
-            crop_path = crop_dir / f"table_{index:02d}.png"
+            crop_path = crop_dir / f"{image_path.stem}_table_{index:02d}.png"
             cv2.imwrite(str(crop_path), crop)
             table_crops.append((index, crop_path, crop))
 
@@ -599,6 +658,10 @@ if __name__ == "__main__":
     analyzer = Page1TableAnalyzer(
         include_second_table=False,
         include_third_table=False,
+        crop_padding_left=0,
+        crop_padding_top=0,
+        crop_padding_right=0,
+        crop_padding_bottom=5,
     )
     input_dir = Path("./data/image")
     image_files = sorted(
@@ -613,3 +676,4 @@ if __name__ == "__main__":
         analyzer.detect_tables(image_path)
 
     analyzer.save_html()
+    analyzer.save_report()
