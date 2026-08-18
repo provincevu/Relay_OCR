@@ -3,7 +3,8 @@
     {
       "key": "thiet_bi_duoc_bao_ve",
       "names": [
-        "Thiết bị được bảo vệ"
+        "Thiết bị được bảo vệ",
+        "Thiết bị"
       ]
     },
     {
@@ -23,7 +24,7 @@
       "names": [
         "Tên rơ-le",
         "Tên rơ le",
-        "Tên role"
+        "Tên role",
         "Tên ro-le"
       ]
     },
@@ -32,13 +33,19 @@
       "names": [
         "Phiên bản rơ-le",
         "Phiên bản rơ le",
-        "Phiên bản role"
+        "Phiên bản role",
+        "Phiên bản",
+        "Phiên bản ro-le"
+      ],
+      "context_keys": [
+        "ten_ro_le"
       ]
     },
     {
       "key": "so_do_danh_so",
       "names": [
-        "Sơ đồ đánh số"
+        "Sơ đồ đánh số",
+        "Sơ đồ"
       ]
     },
     {
@@ -46,37 +53,43 @@
       "names": [
         "Số hiệu rơ-le",
         "Số hiệu rơ le",
-        "Số hiệu role"
+        "Số hiệu role",
+        "Số hiệu ro-le",
+        "Số hiệu"
       ]
     },
     {
       "key": "ty_so_bien_dong_dien",
       "names": [
-        "Tỷ số biến dòng điện"
+        "Tỷ số biến dòng điện",
+        "biến dòng điện"
       ]
     },
     {
       "key": "nha_che_tao",
       "names": [
-        "Nhà chế tạo"
+        "Nhà chế tạo",
+        "Nhà sản xuất"
       ]
     },
     {
       "key": "ty_so_bien_dien_ap",
       "names": [
-        "Tỷ số biến điện áp"
+        "Tỷ số biến điện áp",
+        "biến điện áp"
       ]
     },
     {
       "key": "nam_lap_dat",
       "names": [
-        "Năm lắp đặt"
+        "Năm"
       ]
     },
     {
       "key": "so_hieu_ban_ve_mot_soi",
       "names": [
-        "Số hiệu bản vẽ một sợi"
+        "Số hiệu bản vẽ một sợi",
+        "bản vẽ một sợi"
       ]
     },
     {
@@ -88,7 +101,10 @@
     {
       "key": "phien_ban_phan_mem",
       "names": [
-        "Phiên bản phần mềm"
+        "Phiên bản"
+      ],
+      "context_keys": [
+        "phan_mem"
       ]
     },
     {
