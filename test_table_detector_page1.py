@@ -326,6 +326,11 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
                         matches,
                         match_index,
                     )
+                    raw_field_text = self._extract_field_raw_text(
+                        cell["text"],
+                        matches,
+                        match_index,
+                    )
 
                     if selected_candidate is None:
                         self.field_review.append(
@@ -340,13 +345,24 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
                                 ],
                                 "muc_do_tin_cay": 1,
                                 "cell_score": cell["score"],
-                                "raw_text": cell["text"],
+                                "raw_text": raw_field_text,
                                 "reason": "context_khong_xac_dinh",
                             }
                         )
                         continue
 
                     field_key = selected_candidate["field"]["key"]
+                    if field_key == "ten_ro_le" and value:
+                        version_match = re.search(
+                            r"phiên\s+bản",
+                            value,
+                            re.IGNORECASE,
+                        )
+                        if version_match:
+                            value = self._clean_text(
+                                value[:version_match.start()]
+                            ) or None
+
                     extracted_data[field_key] = value
                     field_details[field_key] = {
                         "matched_name": selected_candidate["name"],
@@ -354,7 +370,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
                         "muc_do_tin_cay": 1,
                         "cell_index": cell["index"],
                         "cell_score": cell["score"],
-                        "raw_text": cell["text"],
+                        "raw_text": raw_field_text,
                     }
 
                 if not matches and ":" in cell["text"]:
@@ -375,6 +391,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
                             }
                         )
 
+        self._move_version_suffixes(extracted_data, field_details)
         self.extracted_tables.append(
             {
                 "source_image": source_image,
@@ -483,6 +500,61 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             value_text = value_text.split(":", 1)[1]
 
         return self._clean_text(value_text) or None
+
+    def _move_version_suffixes(self, extracted_data, field_details):
+        """Chuyển text sau số cuối của version sang field cha tương ứng."""
+        version_parent_keys = {
+            "phien_ban_ro_le": "ten_ro_le",
+            "phien_ban_phan_mem": "phan_mem",
+        }
+
+        for version_key, parent_key in version_parent_keys.items():
+            version_value = extracted_data[version_key]
+            if not version_value:
+                continue
+
+            integer_matches = list(re.finditer(r"\d+", version_value))
+            if not integer_matches:
+                continue
+
+            last_integer_end = integer_matches[-1].end()
+            suffix = self._clean_text(version_value[last_integer_end:])
+            if not suffix:
+                continue
+
+            extracted_data[version_key] = self._clean_text(
+                version_value[:last_integer_end]
+            )
+            parent_value = extracted_data[parent_key] or ""
+            extracted_data[parent_key] = self._clean_text(
+                f"{parent_value} {suffix}"
+            )
+
+            version_detail = field_details.get(version_key)
+            if version_detail:
+                raw_text = version_detail["raw_text"]
+                raw_integer_matches = list(re.finditer(r"\d+", raw_text))
+                if raw_integer_matches:
+                    raw_integer_end = raw_integer_matches[-1].end()
+                    version_detail["raw_text"] = self._clean_text(
+                        raw_text[:raw_integer_end]
+                    )
+
+            parent_detail = field_details.get(parent_key)
+            if parent_detail:
+                parent_detail["raw_text"] = self._clean_text(
+                    f"{parent_detail['raw_text']} {suffix}"
+                )
+
+    def _extract_field_raw_text(self, text, matches, match_index):
+        """Lấy raw text từ field name hiện tại đến field name kế tiếp."""
+        raw_text_end = (
+            matches[match_index + 1]["start"]
+            if match_index + 1 < len(matches)
+            else len(text)
+        )
+        raw_text = text[matches[match_index]["start"]:raw_text_end]
+        return self._clean_text(raw_text)
 
     def _clean_text(self, text):
         """Gom khoảng trắng thừa nhưng giữ nguyên nội dung OCR."""

@@ -25,7 +25,9 @@
         "Tên rơ-le",
         "Tên rơ le",
         "Tên role",
-        "Tên ro-le"
+        "Tên ro-",
+        "Tên rơ",
+        "Tên ro"
       ]
     },
     {
@@ -62,7 +64,8 @@
       "key": "ty_so_bien_dong_dien",
       "names": [
         "Tỷ số biến dòng điện",
-        "biến dòng điện"
+        "biến dòng điện",
+        "biến dòng"
       ]
     },
     {
@@ -76,7 +79,8 @@
       "key": "ty_so_bien_dien_ap",
       "names": [
         "Tỷ số biến điện áp",
-        "biến điện áp"
+        "biến điện áp",
+        "biến điện"
       ]
     },
     {
@@ -110,7 +114,9 @@
     {
       "key": "tu_bao_ve",
       "names": [
-        "Tủ bảo vệ"
+        "Tủ bảo vệ",
+        "Tù bảo vệ",
+        "Tú bảo vệ"
       ]
     },
     {
