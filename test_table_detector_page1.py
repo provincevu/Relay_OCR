@@ -61,21 +61,21 @@ class Page1TableAnalyzer:
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,
-            cpu_threads=4,
+            cpu_threads=6,
         )
         self.structure_model = TableStructureRecognition(
             model_name="SLANeXt_wired",
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,
-            cpu_threads=4,
+            cpu_threads=6,
         )
         self.cell_model = TableCellsDetection(
             model_name="RT-DETR-L_wired_table_cell_det",
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,
-            cpu_threads=4,
+            cpu_threads=6,
         )
         self.text_detector = Detector({})
         self.text_recognizer = Recognitor({})
@@ -981,7 +981,7 @@ if __name__ == "__main__":
         crop_padding_right=0,
         crop_padding_bottom=5,
     )
-    input_dir = Path("./data/image")
+    input_dir = Path("./data/pdf/page1_png")
     image_files = sorted(
         path
         for path in input_dir.iterdir()
