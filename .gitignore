@@ -47,3 +47,6 @@ use.txt
 # images
 *.png
 *.jpg
+
+#script AI
+create_table_01_ground_truth.py

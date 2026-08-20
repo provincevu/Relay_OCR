@@ -40,6 +40,7 @@ class Page1TableAnalyzer:
         crop_padding_top=0,
         crop_padding_right=0,
         crop_padding_bottom=0,
+        save_evaluation_json=False,
     ):
         self.output_dir = Path(output_dir)
         self.include_second_table = include_second_table
@@ -48,6 +49,7 @@ class Page1TableAnalyzer:
         self.crop_padding_top = crop_padding_top
         self.crop_padding_right = crop_padding_right
         self.crop_padding_bottom = crop_padding_bottom
+        self.save_evaluation_json = save_evaluation_json  # Bật JSON để đánh giá.
         self.html_sections = []
         self.table_warnings = []
         self.report_lines = []
@@ -214,6 +216,18 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         )
         print(f"Dữ liệu TABLE 01: {data_path}")
         print(f"Field cần xem lại: {review_path}")
+
+        if self.save_evaluation_json:
+            evaluation_path = self.output_dir / "table_01_predictions.json"
+            evaluation_data = {
+                f"{Path(item['source_image']).stem}_table_01.png": item["data"]
+                for item in self.extracted_tables
+            }
+            evaluation_path.write_text(
+                json.dumps(evaluation_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(f"Dữ liệu đánh giá TABLE 01: {evaluation_path}")
 
     def _analyze_table(
         self,
@@ -980,6 +994,7 @@ if __name__ == "__main__":
         crop_padding_top=0,
         crop_padding_right=0,
         crop_padding_bottom=5,
+        save_evaluation_json=True,  # Xuất JSON cùng format ground truth.
     )
     input_dir = Path("./data/pdf/page1_png")
     image_files = sorted(
