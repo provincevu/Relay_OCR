@@ -10,13 +10,16 @@
     {
       "key": "kieu_bao_ve",
       "names": [
-        "Kiểu bảo vệ"
+        "Kiểu bảo vệ",
+        "K bảo vệ"
       ]
     },
     {
       "key": "may_cat",
       "names": [
-        "Máy cắt"
+        "Máy cắt",
+        "Máy c",
+        "M cắt"
       ]
     },
     {
@@ -117,7 +120,8 @@
       "names": [
         "Tủ bảo vệ",
         "Tù bảo vệ",
-        "Tú bảo vệ"
+        "Tú bảo vệ",
+        "Từ bảo vệ"
       ]
     },
     {

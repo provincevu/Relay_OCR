@@ -162,6 +162,7 @@ svg {{ width: 100%; height: auto; border: 1px solid #9ca3af; background: #fff; }
 .cell-box {{ fill: rgba(34, 197, 94, 0.12); stroke: #16a34a; stroke-width: 2; }}
 .text-box {{ fill: none; stroke: #2563eb; stroke-width: 1.5; }}
 .cell-label {{ fill: #b91c1c; font-size: 18px; font-weight: bold; }}
+.unofficial-cell {{ background: #fff7ed; color: #9a3412; }}
 .legend span {{ margin-right: 24px; }}
 .green {{ color: #16a34a; }}
 .blue {{ color: #2563eb; }}
@@ -252,17 +253,19 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             cell_result["boxes"]
         )
         valid_cell_boxes = []
+        unofficial_cell_boxes = []
 
-        for cell_index, cell_box in enumerate(sorted_cell_boxes, start=1):
+        for cell_box in sorted_cell_boxes:
             cell_score = float(cell_box["score"])
             if cell_score < CELL_SCORE_THRESHOLD:
+                unofficial_cell_boxes.append(cell_box)
                 coordinate = ", ".join(
                     f"{float(value):.1f}"
                     for value in cell_box["coordinate"]
                 )
                 self.report_lines.append(
                     f"CELL bị bỏ qua | {image_name} | TABLE {table_index:02d} | "
-                    f"CELL {cell_index:02d} | score={cell_score:.4f} | "
+                    f"CELL không chính thức | score={cell_score:.4f} | "
                     f"bbox=[{coordinate}]"
                 )
                 continue
@@ -274,6 +277,13 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             valid_cell_boxes,
             text_regions,
         )
+        unofficial_cells, _ = self._assign_text_to_cells(
+            unofficial_cell_boxes,
+            text_regions,
+        )
+        for cell in unofficial_cells:
+            cell["index"] = None
+
         if table_index == 1:
             self._extract_table_fields(
                 source_image=source_image,
@@ -287,6 +297,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             crop_path=crop_path,
             crop=crop,
             cells=cells,
+            unofficial_cells=unofficial_cells,
             text_regions=text_regions,
             unassigned_texts=unassigned_texts,
             structure_score=structure_result["structure_score"],
@@ -421,8 +432,8 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
 
         for field in self.field_definitions:
             for name in field["names"]:
-                name_pattern = r"\s+".join(
-                    re.escape(part)
+                name_pattern = r"(?<!\w)" + r"\s+".join(
+                    rf"{re.escape(part)}\w*"
                     for part in name.split()
                 )
                 for match in re.finditer(name_pattern, text, re.IGNORECASE):
@@ -516,7 +527,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         return self._clean_text(value_text) or None
 
     def _move_version_suffixes(self, extracted_data, field_details):
-        """Chuyển text sau số cuối của version sang field cha tương ứng."""
+        """Giữ version đến số cuối hoặc hậu tố A-D hợp lệ."""
         version_parent_keys = {
             "phien_ban_ro_le": "ten_ro_le",
             "phien_ban_phan_mem": "phan_mem",
@@ -527,25 +538,29 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             if not version_value:
                 continue
 
+            if re.search(r"\d[A-D]$", version_value):
+                continue
+
             integer_matches = list(re.finditer(r"\d+", version_value))
-            if not integer_matches:
-                continue
+            if integer_matches:
+                last_integer_end = integer_matches[-1].end()
+                suffix = self._clean_text(version_value[last_integer_end:])
+                if not suffix:
+                    continue
+                extracted_data[version_key] = self._clean_text(
+                    version_value[:last_integer_end]
+                )
+            else:
+                suffix = version_value
+                extracted_data[version_key] = None
 
-            last_integer_end = integer_matches[-1].end()
-            suffix = self._clean_text(version_value[last_integer_end:])
-            if not suffix:
-                continue
-
-            extracted_data[version_key] = self._clean_text(
-                version_value[:last_integer_end]
-            )
             parent_value = extracted_data[parent_key] or ""
             extracted_data[parent_key] = self._clean_text(
                 f"{parent_value} {suffix}"
             )
 
             version_detail = field_details.get(version_key)
-            if version_detail:
+            if version_detail and integer_matches:
                 raw_text = version_detail["raw_text"]
                 raw_integer_matches = list(re.finditer(r"\d+", raw_text))
                 if raw_integer_matches:
@@ -553,6 +568,8 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
                     version_detail["raw_text"] = self._clean_text(
                         raw_text[:raw_integer_end]
                     )
+            elif version_detail:
+                field_details.pop(version_key)
 
             parent_detail = field_details.get(parent_key)
             if parent_detail:
@@ -838,6 +855,7 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         crop_path,
         crop,
         cells,
+        unofficial_cells,
         text_regions,
         unassigned_texts,
         structure_score,
@@ -868,13 +886,22 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
             text_shapes.append(f'<polygon class="text-box" points="{points}" />')
 
         cell_rows = []
-        for cell in cells:
+        displayed_cells = self._sort_boxes_left_to_right(
+            cells + unofficial_cells
+        )
+        for cell in displayed_cells:
             coordinate = ", ".join(
                 f"{value:.1f}" for value in cell["coordinate"]
             )
+            if cell["index"] is None:
+                cell_label = "Không chính thức"
+                row_class = ' class="unofficial-cell"'
+            else:
+                cell_label = f"C{cell['index']:02d}"
+                row_class = ""
             cell_rows.append(
-                "<tr>"
-                f'<td>C{cell["index"]:02d}</td>'
+                f"<tr{row_class}>"
+                f"<td>{cell_label}</td>"
                 f"<td>{coordinate}</td>"
                 f'<td>{cell["score"]:.3f}</td>'
                 f'<td>{escape(cell["text"])}</td>'
