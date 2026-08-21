@@ -151,6 +151,10 @@ class DebugTableFieldsMixin:
                     for part in name.split()
                 )
                 for match in re.finditer(name_pattern, text, re.IGNORECASE):
+                    is_first_field = not text[:match.start()].strip()
+                    has_colon = re.match(r"\s*:", text[match.end():])
+                    if not is_first_field and not has_colon:
+                        continue
                     candidates.append(
                         {
                             "start": match.start(),

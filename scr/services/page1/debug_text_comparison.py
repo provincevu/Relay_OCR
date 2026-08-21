@@ -158,6 +158,8 @@ def correct_value_with_ppocr(value, text_regions):
         for vietocr_token, ppocr_token in token_pairs:
             if vietocr_token == ppocr_token:
                 continue
+            if find_confusable_changes(vietocr_token, ppocr_token) is None:
+                continue
             corrections.setdefault(vietocr_token, []).append(ppocr_token)
 
     corrected_parts = []
