@@ -1,12 +1,14 @@
 # Mục đích: tách logic trích xuất field cho script debug bảng page 1.
-# Chức năng: khớp names, lấy value, xử lý context và hậu tố phiên bản.
-# Luồng xử lý: cell đã OCR → field match → context → dữ liệu và review.
+# Chức năng: khớp names, lấy value, sửa token không dấu bằng PP-OCRv6 và xử lý phiên bản.
+# Luồng xử lý: cell đã OCR → field match → value → sửa token → context → dữ liệu và review.
 # Cấu hình/parameter: dùng field_definitions, field_review và extracted_tables của analyzer.
 # Quan hệ: được Page1TableAnalyzer kế thừa để giữ nguyên contract hiện có.
 # Input/output: nhận danh sách cell; cập nhật dữ liệu trích xuất và review.
 # Contract: giữ nguyên các phương thức nội bộ mà luồng test đang gọi.
 
 import re
+
+from .debug_text_comparison import correct_value_with_ppocr
 
 
 class DebugTableFieldsMixin:
@@ -58,6 +60,11 @@ class DebugTableFieldsMixin:
                         matches,
                         match_index,
                     )
+                    if value:
+                        value = correct_value_with_ppocr(
+                            value,
+                            cell["text_regions"],
+                        )
                     raw_field_text = self._extract_field_raw_text(
                         cell["text"],
                         matches,

@@ -7,67 +7,13 @@
 # Contract: giữ nguyên tên file crop và nội dung section HTML hiện có.
 
 import base64
-import re
-import unicodedata
 from html import escape
 
 import cv2
 
-
-TOKEN_PATTERN = re.compile(
-    r"[^\W_]+(?:[./:+_`-][^\W_]+)*|`",
-    re.UNICODE,
-)
-CONFUSABLE_TEXT_PAIRS = (
-    ("m", "rn"),
-    ("m", "nn"),
-    ("w", "vv"),
-    ("I", "l"),
-    ("I", "1"),
-    ("I", "`"),
-    ("1", "l"),
-    ("1", "7"),
-    ("0", "O"),
-    ("0", "o"),
-    ("0", "D"),
-    ("O", "Q"),
-    ("O", "D"),
-    ("o", "a"),
-    ("o", "e"),
-    ("5", "S"),
-    ("5", "s"),
-    ("S", "8"),
-    ("2", "Z"),
-    ("2", "z"),
-    ("Z", "7"),
-    ("8", "B"),
-    ("8", "3"),
-    ("B", "R"),
-    ("6", "G"),
-    ("6", "b"),
-    ("G", "C"),
-    ("9", "g"),
-    ("9", "q"),
-    ("q", "g"),
-    ("c", "e"),
-    ("c", "o"),
-    ("e", "o"),
-    ("a", "e"),
-    ("w", "v"),
-    ("u", "v"),
-    ("v", "y"),
-    ("h", "b"),
-    ("h", "n"),
-    ("b", "6"),
-    ("n", "r"),
-    ("r", "v"),
-    ("f", "t"),
-    ("t", "l"),
-)
-CONFUSABLE_TRANSFORMS = tuple(
-    transform
-    for pair in CONFUSABLE_TEXT_PAIRS
-    for transform in (pair, tuple(reversed(pair)))
+from .debug_text_comparison import (
+    find_confusable_changes,
+    pair_non_vietnamese_tokens,
 )
 
 
@@ -175,22 +121,15 @@ class DebugTableVisualizationMixin:
         rows = []
 
         for region_index, region in enumerate(text_regions, start=1):
-            vietocr_tokens = TOKEN_PATTERN.findall(region["text"])
-            ppocr_tokens = TOKEN_PATTERN.findall(region["ppocr_text"])
-
-            for token_index, vietocr_token in enumerate(vietocr_tokens):
-                if self._has_vietnamese_mark(vietocr_token):
-                    continue
-
-                ppocr_token = (
-                    ppocr_tokens[token_index]
-                    if token_index < len(ppocr_tokens)
-                    else ""
-                )
+            token_pairs = pair_non_vietnamese_tokens(
+                region["text"],
+                region["ppocr_text"],
+            )
+            for vietocr_token, ppocr_token in token_pairs:
                 if vietocr_token == ppocr_token:
                     continue
 
-                confusable_changes = self._find_confusable_changes(
+                confusable_changes = find_confusable_changes(
                     vietocr_token,
                     ppocr_token,
                 )
@@ -226,64 +165,6 @@ class DebugTableVisualizationMixin:
             "<th>Kết quả</th></tr></thead>"
             f'<tbody>{"".join(rows)}</tbody>'
             "</table>"
-        )
-
-    def _find_confusable_changes(self, source_text, target_text):
-        """Trả các phép đổi ký tự gần giống nếu chúng giải thích toàn bộ sai khác."""
-        compared_states = {}
-
-        def compare(source_index, target_index):
-            state = (source_index, target_index)
-            if state in compared_states:
-                return compared_states[state]
-            if source_index == len(source_text) and target_index == len(
-                target_text
-            ):
-                return []
-
-            if (
-                source_index < len(source_text)
-                and target_index < len(target_text)
-                and source_text[source_index] == target_text[target_index]
-            ):
-                remaining_changes = compare(
-                    source_index + 1,
-                    target_index + 1,
-                )
-                if remaining_changes is not None:
-                    compared_states[state] = remaining_changes
-                    return remaining_changes
-
-            for source, target in CONFUSABLE_TRANSFORMS:
-                if not source_text.startswith(source, source_index):
-                    continue
-                if not target_text.startswith(target, target_index):
-                    continue
-
-                remaining_changes = compare(
-                    source_index + len(source),
-                    target_index + len(target),
-                )
-                if remaining_changes is not None:
-                    changes = [(source, target), *remaining_changes]
-                    compared_states[state] = changes
-                    return changes
-
-            compared_states[state] = None
-            return None
-
-        changes = compare(0, 0)
-        return changes or None
-
-    def _has_vietnamese_mark(self, token):
-        """Kiểm tra token có chữ tiếng Việt mang dấu hoặc chữ đ hay không."""
-        if "đ" in token.lower():
-            return True
-
-        normalized_token = unicodedata.normalize("NFD", token)
-        return any(
-            unicodedata.combining(character)
-            for character in normalized_token
         )
 
     def _draw_tables(self, image, table_boxes):
