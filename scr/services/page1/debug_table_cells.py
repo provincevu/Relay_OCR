@@ -1,10 +1,10 @@
 # Mục đích: tách logic OCR, gán text và sắp xếp cell cho script debug page 1.
-# Chức năng: nhận dạng text, gán text vào cell và tạo bảng logic 7x2.
-# Luồng xử lý: ảnh bảng → text region → cell → hàng → HTML bảng chuẩn hóa.
-# Cấu hình/parameter: dùng text_detector và text_recognizer của analyzer.
+# Chức năng: nhận dạng bằng VietOCR và PP-OCRv6, gán text vào cell và tạo bảng logic 7x2.
+# Luồng xử lý: ảnh bảng → text region từ hai recognizer → cell → hàng → HTML bảng chuẩn hóa.
+# Cấu hình/parameter: dùng text_detector, text_recognizer và ppocr_recognizer của analyzer.
 # Quan hệ: được Page1TableAnalyzer kế thừa; phối hợp với module field và visualization.
 # Input/output: nhận ảnh hoặc bbox; trả text region, cell, hàng hoặc HTML bảng.
-# Contract: giữ nguyên cấu trúc cell gồm index, coordinate, score, text_regions và text.
+# Contract: text tiếp tục là kết quả VietOCR; ppocr_text chứa kết quả PP-OCRv6.
 
 import re
 from html import escape
@@ -16,7 +16,7 @@ class DebugTableCellsMixin:
     """Cung cấp logic OCR và xử lý cell cho analyzer debug."""
 
     def _recognize_text(self, image):
-        """Dùng Detector và Recognitor hiện có để nhận dạng các vùng text."""
+        """Nhận dạng mỗi vùng text bằng VietOCR và PP-OCRv6."""
         text_regions = []
         height, width = image.shape[:2]
         detection_results = self.text_detector.detect(image)
@@ -32,6 +32,11 @@ class DebugTableCellsMixin:
                 y_max = min(y_max, height)
                 text_crop = image[y_min:y_max, x_min:x_max]
                 text = self.text_recognizer.recognize(text_crop)
+                ppocr_result = self.ppocr_recognizer.predict(
+                    text_crop,
+                    batch_size=1,
+                )[0]
+                ppocr_text = ppocr_result["rec_text"]
                 center_x = float(polygon[:, 0].mean())
                 center_y = float(polygon[:, 1].mean())
                 text_regions.append(
@@ -39,6 +44,7 @@ class DebugTableCellsMixin:
                         "polygon": polygon.tolist(),
                         "center": [center_x, center_y],
                         "text": text,
+                        "ppocr_text": ppocr_text,
                     }
                 )
 
@@ -93,6 +99,9 @@ class DebugTableCellsMixin:
             )
             cell["text"] = " ".join(
                 region["text"] for region in cell["text_regions"]
+            )
+            cell["ppocr_text"] = " ".join(
+                region["ppocr_text"] for region in cell["text_regions"]
             )
 
         return cells, unassigned_texts

@@ -1,6 +1,6 @@
 # Mục đích: điều phối toàn bộ luồng debug nhận diện bảng trên page 1.
-# Chức năng: khởi tạo model, nhận diện bảng/cell/text và lưu kết quả debug.
-# Luồng xử lý: ảnh → table crop → structure/cell/OCR → field → HTML/JSON/report.
+# Chức năng: khởi tạo model, nhận diện bảng/cell/text bằng VietOCR và PP-OCRv6 rồi lưu kết quả debug.
+# Luồng xử lý: ảnh → table crop → structure/cell → VietOCR/PP-OCRv6 → field → HTML/JSON/report.
 # Cấu hình/parameter: chọn số bảng, padding crop và tùy chọn JSON đánh giá.
 # Quan hệ: kết hợp ba module debug_table_fields, debug_table_cells và debug_table_visualization.
 # Input/output: detect_tables() nhận đường dẫn ảnh; các phương thức save ghi output/layout.
@@ -14,6 +14,7 @@ from paddleocr import (
     LayoutDetection,
     TableCellsDetection,
     TableStructureRecognition,
+    TextRecognition,
 )
 
 from scr.services.detector import Detector
@@ -87,6 +88,13 @@ class Page1TableAnalyzer(
         )
         self.text_detector = Detector({})
         self.text_recognizer = Recognitor({})
+        self.ppocr_recognizer = TextRecognition(
+            model_name="PP-OCRv6_medium_rec",
+            device="cpu",
+            engine="paddle_static",
+            enable_mkldnn=False,
+            cpu_threads=6,
+        )
 
     def detect_tables(self, image_path):
         """Nhận diện, trích xuất và lưu các bảng được chọn để debug."""
@@ -175,6 +183,7 @@ svg {{ width: 100%; height: auto; border: 1px solid #9ca3af; background: #fff; }
 .text-box {{ fill: none; stroke: #2563eb; stroke-width: 1.5; }}
 .cell-label {{ fill: #b91c1c; font-size: 18px; font-weight: bold; }}
 .unofficial-cell {{ background: #fff7ed; color: #9a3412; }}
+.comparison-diff {{ color: #b91c1c; font-weight: bold; }}
 .legend span {{ margin-right: 24px; }}
 .green {{ color: #16a34a; }}
 .blue {{ color: #2563eb; }}

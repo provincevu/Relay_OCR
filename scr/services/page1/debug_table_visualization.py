@@ -1,5 +1,5 @@
 # Mục đích: tách logic trực quan hóa cho script debug bảng page 1.
-# Chức năng: dựng HTML, vẽ bbox bảng và lưu ảnh crop bảng.
+# Chức năng: dựng HTML có kết quả hai recognizer, vẽ bbox bảng và lưu ảnh crop bảng.
 # Luồng xử lý: kết quả cell/table → ảnh hoặc HTML debug.
 # Cấu hình/parameter: dùng output_dir và crop padding của analyzer.
 # Quan hệ: được Page1TableAnalyzer kế thừa sau bước detection và OCR.
@@ -7,9 +7,68 @@
 # Contract: giữ nguyên tên file crop và nội dung section HTML hiện có.
 
 import base64
+import re
+import unicodedata
 from html import escape
 
 import cv2
+
+
+TOKEN_PATTERN = re.compile(
+    r"[^\W_]+(?:[./:+_`-][^\W_]+)*|`",
+    re.UNICODE,
+)
+CONFUSABLE_TEXT_PAIRS = (
+    ("m", "rn"),
+    ("m", "nn"),
+    ("w", "vv"),
+    ("I", "l"),
+    ("I", "1"),
+    ("I", "`"),
+    ("1", "l"),
+    ("1", "7"),
+    ("0", "O"),
+    ("0", "o"),
+    ("0", "D"),
+    ("O", "Q"),
+    ("O", "D"),
+    ("o", "a"),
+    ("o", "e"),
+    ("5", "S"),
+    ("5", "s"),
+    ("S", "8"),
+    ("2", "Z"),
+    ("2", "z"),
+    ("Z", "7"),
+    ("8", "B"),
+    ("8", "3"),
+    ("B", "R"),
+    ("6", "G"),
+    ("6", "b"),
+    ("G", "C"),
+    ("9", "g"),
+    ("9", "q"),
+    ("q", "g"),
+    ("c", "e"),
+    ("c", "o"),
+    ("e", "o"),
+    ("a", "e"),
+    ("w", "v"),
+    ("u", "v"),
+    ("v", "y"),
+    ("h", "b"),
+    ("h", "n"),
+    ("b", "6"),
+    ("n", "r"),
+    ("r", "v"),
+    ("f", "t"),
+    ("t", "l"),
+)
+CONFUSABLE_TRANSFORMS = tuple(
+    transform
+    for pair in CONFUSABLE_TEXT_PAIRS
+    for transform in (pair, tuple(reversed(pair)))
+)
 
 
 class DebugTableVisualizationMixin:
@@ -74,12 +133,18 @@ class DebugTableVisualizationMixin:
                 f"<td>{coordinate}</td>"
                 f'<td>{cell["score"]:.3f}</td>'
                 f'<td>{escape(cell["text"])}</td>'
+                f'<td>{escape(cell["ppocr_text"])}</td>'
                 "</tr>"
             )
 
-        unassigned_html = " ".join(
-            escape(region["text"]) for region in unassigned_texts
+        unassigned_html = "<br>".join(
+            "VietOCR: "
+            f'{escape(region["text"])} | '
+            "PP-OCRv6: "
+            f'{escape(region["ppocr_text"])}'
+            for region in unassigned_texts
         )
+        comparison_html = self._build_token_comparison(text_regions)
         return f"""
 <section>
 <h2>{escape(image_name)} - TABLE {table_index:02d}</h2>
@@ -92,15 +157,134 @@ class DebugTableVisualizationMixin:
 </svg>
 <h3>Thông tin theo cell</h3>
 <table>
-<thead><tr><th>Cell</th><th>Bounding box</th><th>Score</th><th>Text</th></tr></thead>
+<thead><tr><th>Cell</th><th>Bounding box</th><th>Score</th><th>VietOCR</th><th>PP-OCRv6 medium</th></tr></thead>
 <tbody>{"".join(cell_rows)}</tbody>
 </table>
 <p><strong>Text chưa gán vào cell:</strong> {unassigned_html}</p>
+<h3>Khác biệt thuộc nhóm ký tự gần giống nhau</h3>
+<p>Chỉ hiển thị token khác nhau, không có dấu tiếng Việt và khớp các nhóm dễ nhầm đã cấu hình.</p>
+{comparison_html}
 <h3>Bảng chuẩn hóa: 7 hàng × 2 cột vật lý</h3>
 <p>Field bổ sung như “Phiên bản” được giữ bên trong cột phải dưới dạng field logic.</p>
 {normalized_table_html}
 </section>
 """
+
+    def _build_token_comparison(self, text_regions):
+        """Chỉ hiển thị token khác nhau do các ký tự gần giống đã cấu hình."""
+        rows = []
+
+        for region_index, region in enumerate(text_regions, start=1):
+            vietocr_tokens = TOKEN_PATTERN.findall(region["text"])
+            ppocr_tokens = TOKEN_PATTERN.findall(region["ppocr_text"])
+
+            for token_index, vietocr_token in enumerate(vietocr_tokens):
+                if self._has_vietnamese_mark(vietocr_token):
+                    continue
+
+                ppocr_token = (
+                    ppocr_tokens[token_index]
+                    if token_index < len(ppocr_tokens)
+                    else ""
+                )
+                if vietocr_token == ppocr_token:
+                    continue
+
+                confusable_changes = self._find_confusable_changes(
+                    vietocr_token,
+                    ppocr_token,
+                )
+                if confusable_changes is None:
+                    continue
+
+                changes_text = ", ".join(
+                    f"{source} ↔ {target}"
+                    for source, target in confusable_changes
+                )
+
+                rows.append(
+                    "<tr>"
+                    f"<td>T{region_index:02d}</td>"
+                    f"<td>{escape(vietocr_token)}</td>"
+                    f"<td>{escape(ppocr_token)}</td>"
+                    f"<td>{escape(changes_text)}</td>"
+                    '<td class="comparison-diff">Khác</td>'
+                    "</tr>"
+                )
+
+        difference_count = len(rows)
+        if not rows:
+            rows.append(
+                '<tr><td colspan="5">Không có khác biệt thuộc các nhóm ký tự gần giống.</td></tr>'
+            )
+
+        return (
+            f"<p>Số token khác nhau: {difference_count}</p>"
+            "<table>"
+            "<thead><tr><th>Vùng text</th><th>VietOCR</th>"
+            "<th>PP-OCRv6 medium</th><th>Cặp dễ nhầm</th>"
+            "<th>Kết quả</th></tr></thead>"
+            f'<tbody>{"".join(rows)}</tbody>'
+            "</table>"
+        )
+
+    def _find_confusable_changes(self, source_text, target_text):
+        """Trả các phép đổi ký tự gần giống nếu chúng giải thích toàn bộ sai khác."""
+        compared_states = {}
+
+        def compare(source_index, target_index):
+            state = (source_index, target_index)
+            if state in compared_states:
+                return compared_states[state]
+            if source_index == len(source_text) and target_index == len(
+                target_text
+            ):
+                return []
+
+            if (
+                source_index < len(source_text)
+                and target_index < len(target_text)
+                and source_text[source_index] == target_text[target_index]
+            ):
+                remaining_changes = compare(
+                    source_index + 1,
+                    target_index + 1,
+                )
+                if remaining_changes is not None:
+                    compared_states[state] = remaining_changes
+                    return remaining_changes
+
+            for source, target in CONFUSABLE_TRANSFORMS:
+                if not source_text.startswith(source, source_index):
+                    continue
+                if not target_text.startswith(target, target_index):
+                    continue
+
+                remaining_changes = compare(
+                    source_index + len(source),
+                    target_index + len(target),
+                )
+                if remaining_changes is not None:
+                    changes = [(source, target), *remaining_changes]
+                    compared_states[state] = changes
+                    return changes
+
+            compared_states[state] = None
+            return None
+
+        changes = compare(0, 0)
+        return changes or None
+
+    def _has_vietnamese_mark(self, token):
+        """Kiểm tra token có chữ tiếng Việt mang dấu hoặc chữ đ hay không."""
+        if "đ" in token.lower():
+            return True
+
+        normalized_token = unicodedata.normalize("NFD", token)
+        return any(
+            unicodedata.combining(character)
+            for character in normalized_token
+        )
 
     def _draw_tables(self, image, table_boxes):
         """Vẽ bbox, nhãn score và nền tô mờ lên ảnh debug."""
