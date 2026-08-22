@@ -1,6 +1,6 @@
 # Mục đích: tách logic OCR, gán text và sắp xếp cell cho script debug page 1.
-# Chức năng: nhận dạng bằng VietOCR và PP-OCRv6, gán text vào cell và tạo bảng logic 7x2.
-# Luồng xử lý: ảnh bảng → text region từ hai recognizer → cell → hàng → HTML bảng chuẩn hóa.
+# Chức năng: tách text qua divider, nhận dạng bằng hai model, gán cell và tạo bảng logic 7x2.
+# Luồng xử lý: ảnh bảng → divider dọc → text region → cell → hàng → HTML bảng chuẩn hóa.
 # Cấu hình/parameter: dùng text_detector, text_recognizer và ppocr_recognizer của analyzer.
 # Quan hệ: được Page1TableAnalyzer kế thừa; phối hợp với module field và visualization.
 # Input/output: nhận ảnh hoặc bbox; trả text region, cell, hàng hoặc HTML bảng.
@@ -9,6 +9,7 @@
 import re
 from html import escape
 
+import cv2
 import numpy as np
 
 
@@ -19,36 +20,121 @@ class DebugTableCellsMixin:
         """Nhận dạng mỗi vùng text bằng VietOCR và PP-OCRv6."""
         text_regions = []
         height, width = image.shape[:2]
+        divider_x = self._detect_main_vertical_divider(image)
         detection_results = self.text_detector.detect(image)
 
         for result in detection_results:
             for polygon in result["dt_polys"]:
                 polygon = np.array(polygon, dtype=np.float32)
-                x_min, y_min = polygon.min(axis=0).astype(int)
-                x_max, y_max = polygon.max(axis=0).astype(int)
-                x_min = max(x_min, 0)
-                y_min = max(y_min, 0)
-                x_max = min(x_max, width)
-                y_max = min(y_max, height)
-                text_crop = image[y_min:y_max, x_min:x_max]
-                text = self.text_recognizer.recognize(text_crop)
-                ppocr_result = self.ppocr_recognizer.predict(
-                    text_crop,
-                    batch_size=1,
-                )[0]
-                ppocr_text = ppocr_result["rec_text"]
-                center_x = float(polygon[:, 0].mean())
-                center_y = float(polygon[:, 1].mean())
-                text_regions.append(
-                    {
-                        "polygon": polygon.tolist(),
-                        "center": [center_x, center_y],
-                        "text": text,
-                        "ppocr_text": ppocr_text,
-                    }
+                split_polygons = self._split_polygon_at_divider(
+                    polygon,
+                    divider_x,
+                    width,
                 )
+                for split_polygon in split_polygons:
+                    x_min, y_min = split_polygon.min(axis=0).astype(int)
+                    x_max, y_max = split_polygon.max(axis=0).astype(int)
+                    x_min = max(x_min, 0)
+                    y_min = max(y_min, 0)
+                    x_max = min(x_max, width)
+                    y_max = min(y_max, height)
+                    text_crop = image[y_min:y_max, x_min:x_max]
+                    text = self.text_recognizer.recognize(text_crop)
+                    ppocr_result = self.ppocr_recognizer.predict(
+                        text_crop,
+                        batch_size=1,
+                    )[0]
+                    ppocr_text = ppocr_result["rec_text"]
+                    center_x = float(split_polygon[:, 0].mean())
+                    center_y = float(split_polygon[:, 1].mean())
+                    text_regions.append(
+                        {
+                            "polygon": split_polygon.tolist(),
+                            "center": [center_x, center_y],
+                            "text": text,
+                            "ppocr_text": ppocr_text,
+                        }
+                    )
 
         return text_regions
+
+    def _detect_main_vertical_divider(self, image):
+        """Tìm đường phân cách dọc dài trong vùng giữa bảng."""
+        _, image_width = image.shape[:2]
+        scale = min(1.0, 600 / image_width)
+        resized_image = cv2.resize(
+            image,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA,
+        )
+        gray_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray_image, 30, 100, apertureSize=3)
+        height, width = gray_image.shape
+        detected_lines = cv2.HoughLinesP(
+            edges,
+            1,
+            np.pi / 1800,
+            threshold=max(20, int(height * 0.12)),
+            minLineLength=int(height * 0.25),
+            maxLineGap=int(height * 0.2),
+        )
+        if detected_lines is None:
+            return None
+
+        candidates = []
+        for x_start, y_start, x_end, y_end in detected_lines.reshape(-1, 4):
+            vertical_span = abs(int(y_end) - int(y_start))
+            horizontal_span = abs(int(x_end) - int(x_start))
+            center_x = (int(x_start) + int(x_end)) / 2
+            if vertical_span < height * 0.25:
+                continue
+            if horizontal_span > vertical_span * 0.08:
+                continue
+            if not width * 0.4 < center_x < width * 0.7:
+                continue
+            candidates.append((vertical_span, center_x))
+
+        if not candidates:
+            return None
+
+        _, divider_x = max(candidates)
+        return int(round(divider_x / scale))
+
+    def _split_polygon_at_divider(self, polygon, divider_x, image_width):
+        """Tách polygon text nếu nó cắt qua đường phân cách dọc chính."""
+        if divider_x is None:
+            return [polygon]
+
+        x_min, y_min = polygon.min(axis=0)
+        x_max, y_max = polygon.max(axis=0)
+        minimum_width = max(20, int(image_width * 0.02))
+        if (
+            divider_x - x_min < minimum_width
+            or x_max - divider_x < minimum_width
+        ):
+            return [polygon]
+
+        left_polygon = np.array(
+            [
+                [x_min, y_min],
+                [divider_x - 1, y_min],
+                [divider_x - 1, y_max],
+                [x_min, y_max],
+            ],
+            dtype=np.float32,
+        )
+        right_polygon = np.array(
+            [
+                [divider_x + 1, y_min],
+                [x_max, y_min],
+                [x_max, y_max],
+                [divider_x + 1, y_max],
+            ],
+            dtype=np.float32,
+        )
+        return [left_polygon, right_polygon]
 
     def _assign_text_to_cells(self, cell_boxes, text_regions):
         """Gán text vào cell chứa tâm của polygon text."""
