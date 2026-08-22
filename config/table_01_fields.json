@@ -4,14 +4,21 @@
       "key": "thiet_bi_duoc_bao_ve",
       "names": [
         "Thiết bị được bảo vệ",
-        "Thiết bị"
+        "Thiết bị",
+        "Thiết bị được b",
+        "Thiết bị đ b",
+        "Thiết b"
       ]
     },
     {
       "key": "kieu_bao_ve",
       "names": [
         "Kiểu bảo vệ",
-        "K bảo vệ"
+        "K bảo vệ",
+        "Kiểu b vê",
+        "Kiếu bảo vệ",
+        "Ki báo v",
+        "Ki bào v"
       ]
     },
     {
@@ -19,7 +26,8 @@
       "names": [
         "Máy cắt",
         "Máy c",
-        "M cắt"
+        "M cắt",
+        "Mà c"
       ]
     },
     {
@@ -30,7 +38,10 @@
         "Tên role",
         "Tên ro-",
         "Tên rơ",
-        "Tên ro"
+        "Tên ro",
+        "Tên ro-le",
+        "Tên ro-Ie",
+        "Tên rơle"
       ]
     },
     {
@@ -40,7 +51,10 @@
         "Phiên bản rơ le",
         "Phiên bản role",
         "Phiên bản",
-        "Phiên bản ro-le"
+        "Phiên bản ro-le",
+        "Phiên bản rơ",
+        "Phiên bản ro",
+        "Phiên bản r le"
       ],
       "context_keys": [
         "ten_ro_le"
@@ -50,7 +64,9 @@
       "key": "so_do_danh_so",
       "names": [
         "Sơ đồ đánh số",
-        "Sơ đồ"
+        "Sơ đồ",
+        "Sơ đồ đánh s",
+        "Sơ đ"
       ]
     },
     {
@@ -60,7 +76,11 @@
         "Số hiệu rơ le",
         "Số hiệu role",
         "Số hiệu ro-le",
-        "Số hiệu"
+        "Số hiệu",
+        "Số hiệu rơ",
+        "Số hiệu ro",
+        "Số h rơ",
+        "Số h ro"
       ]
     },
     {
@@ -68,14 +88,20 @@
       "names": [
         "Tỷ số biến dòng điện",
         "biến dòng điện",
-        "biến dòng"
+        "biến dòng",
+        "Tỷ số biến dòng",
+        "Tỷ số biến d",
+        "Tỷ số bi d",
+        "Tỷ số ti"
       ]
     },
     {
       "key": "nha_che_tao",
       "names": [
         "Nhà chế tạo",
-        "Nhà sản xuất"
+        "Nhà sản xuất",
+        "Nhà chế t",
+        "Nhà sản x"
       ]
     },
     {
@@ -84,32 +110,46 @@
         "Tỷ số biến điện áp",
         "biến điện áp",
         "biến điện",
-        "biến áp"
+        "biến áp",
+        "Tỷ số biến điện",
+        "Tỷ số biến đ",
+        "Tỷ số bi đ",
+        "Tỷ số tu"
       ]
     },
     {
       "key": "nam_lap_dat",
       "names": [
-        "Năm"
+        "Năm",
+        "Năm lắp đặt",
+        "Năm lắp đ"
       ]
     },
     {
       "key": "so_hieu_ban_ve_mot_soi",
       "names": [
         "Số hiệu bản vẽ một sợi",
-        "bản vẽ một sợi"
+        "bản vẽ một sợi",
+        "Số hiệu bản vẽ",
+        "Số hiệu bản vẽ một",
+        "Số h bản vẽ"
       ]
     },
     {
       "key": "phan_mem",
       "names": [
-        "Phần mềm"
+        "Phần mềm",
+        "Phần m",
+        "Ph m"
       ]
     },
     {
       "key": "phien_ban_phan_mem",
       "names": [
-        "Phiên bản"
+        "Phiên bản",
+        "Phiên bản phần mềm",
+        "Phiên bản phần m",
+        "Phiên bản ph m"
       ],
       "context_keys": [
         "phan_mem"
@@ -121,13 +161,18 @@
         "Tủ bảo vệ",
         "Tù bảo vệ",
         "Tú bảo vệ",
-        "Từ bảo vệ"
+        "Từ bảo vệ",
+        "Tủ b",
+        "Tù b",
+        "Tú b",
+        "Từ b"
       ]
     },
     {
       "key": "mach_bao_ve",
       "names": [
-        "Mạch bảo vệ"
+        "Mạch bảo vệ",
+        "Mạch b"
       ]
     }
   ]

@@ -11,7 +11,7 @@ import unicodedata
 
 
 TOKEN_PATTERN = re.compile(
-    r"[^\W_]+(?:[./:+_`-][^\W_]+)*|`",
+    r"(?:[^\W_]|[+&`])+",
     re.UNICODE,
 )
 CONFUSABLE_TEXT_PAIRS = (
@@ -23,6 +23,7 @@ CONFUSABLE_TEXT_PAIRS = (
     ("I", "`"),
     ("1", "l"),
     ("1", "7"),
+    ("4", "+"),
     ("0", "O"),
     ("0", "o"),
     ("0", "D"),
@@ -33,6 +34,7 @@ CONFUSABLE_TEXT_PAIRS = (
     ("5", "S"),
     ("5", "s"),
     ("S", "8"),
+    ("8", "&"),
     ("2", "Z"),
     ("2", "z"),
     ("Z", "7"),
