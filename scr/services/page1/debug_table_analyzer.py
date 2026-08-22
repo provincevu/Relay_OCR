@@ -277,6 +277,10 @@ pre {{ overflow-x: auto; background: #f3f4f6; padding: 12px; }}
         sorted_cell_boxes = self._sort_boxes_left_to_right(
             cell_result["boxes"]
         )
+        sorted_cell_boxes = self._resolve_nested_cell_boxes(
+            crop,
+            sorted_cell_boxes,
+        )
         valid_cell_boxes = []
         low_score_cell_boxes = []
 

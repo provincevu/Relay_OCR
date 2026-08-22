@@ -136,6 +136,208 @@ class DebugTableCellsMixin:
         )
         return [left_polygon, right_polygon]
 
+    def _resolve_nested_cell_boxes(self, image, cell_boxes):
+        """Loại box lồng nhau dựa trên đường kẻ phân chia cell thật."""
+        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        _, line_mask = cv2.threshold(
+            gray_image,
+            0,
+            255,
+            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+        )
+        removed_indexes = set()
+        box_indexes = sorted(
+            range(len(cell_boxes)),
+            key=lambda index: self._box_area(cell_boxes[index]),
+            reverse=True,
+        )
+
+        for parent_index in box_indexes:
+            if parent_index in removed_indexes:
+                continue
+
+            parent_box = cell_boxes[parent_index]
+            child_indexes = [
+                child_index
+                for child_index in box_indexes
+                if child_index != parent_index
+                and child_index not in removed_indexes
+                and self._is_nested_cell(
+                    parent_box,
+                    cell_boxes[child_index],
+                )
+            ]
+            if not child_indexes:
+                continue
+
+            child_boxes = [
+                cell_boxes[child_index]
+                for child_index in child_indexes
+            ]
+            if self._children_have_real_separator(
+                line_mask,
+                parent_box,
+                child_boxes,
+            ):
+                removed_indexes.add(parent_index)
+                continue
+
+            removed_indexes.update(child_indexes)
+
+        return [
+            cell_box
+            for index, cell_box in enumerate(cell_boxes)
+            if index not in removed_indexes
+        ]
+
+    def _is_nested_cell(self, parent_box, child_box):
+        """Kiểm tra một cell nhỏ có nằm gần như hoàn toàn trong cell lớn."""
+        parent_area = self._box_area(parent_box)
+        child_area = self._box_area(child_box)
+        if child_area > parent_area * 0.85:
+            return False
+
+        parent_x_min, parent_y_min, parent_x_max, parent_y_max = map(
+            float,
+            parent_box["coordinate"],
+        )
+        child_x_min, child_y_min, child_x_max, child_y_max = map(
+            float,
+            child_box["coordinate"],
+        )
+        intersection_width = max(
+            0.0,
+            min(parent_x_max, child_x_max)
+            - max(parent_x_min, child_x_min),
+        )
+        intersection_height = max(
+            0.0,
+            min(parent_y_max, child_y_max)
+            - max(parent_y_min, child_y_min),
+        )
+        intersection_area = intersection_width * intersection_height
+        return intersection_area / child_area >= 0.9
+
+    def _children_have_real_separator(
+        self,
+        line_mask,
+        parent_box,
+        child_boxes,
+    ):
+        """Kiểm tra các cell con có được ngăn bởi đường kẻ thật hay không."""
+        parent_x_min, parent_y_min, parent_x_max, parent_y_max = map(
+            float,
+            parent_box["coordinate"],
+        )
+        parent_width = parent_x_max - parent_x_min
+        parent_height = parent_y_max - parent_y_min
+
+        for first_index, first_box in enumerate(child_boxes):
+            first_coordinate = list(map(float, first_box["coordinate"]))
+            for second_box in child_boxes[first_index + 1 :]:
+                second_coordinate = list(
+                    map(float, second_box["coordinate"])
+                )
+                left_box, right_box = sorted(
+                    [first_coordinate, second_coordinate],
+                    key=lambda coordinate: coordinate[0],
+                )
+                vertical_overlap = max(
+                    0.0,
+                    min(left_box[3], right_box[3])
+                    - max(left_box[1], right_box[1]),
+                )
+                horizontal_span = (
+                    max(left_box[2], right_box[2])
+                    - min(left_box[0], right_box[0])
+                )
+                horizontal_gap = right_box[0] - left_box[2]
+                if (
+                    vertical_overlap >= parent_height * 0.65
+                    and horizontal_span >= parent_width * 0.8
+                    and horizontal_gap <= parent_width * 0.05
+                ):
+                    separator_x = (left_box[2] + right_box[0]) / 2
+                    if self._has_continuous_line(
+                        line_mask,
+                        separator_x,
+                        max(left_box[1], right_box[1]),
+                        min(left_box[3], right_box[3]),
+                        vertical=True,
+                    ):
+                        return True
+
+                top_box, bottom_box = sorted(
+                    [first_coordinate, second_coordinate],
+                    key=lambda coordinate: coordinate[1],
+                )
+                horizontal_overlap = max(
+                    0.0,
+                    min(top_box[2], bottom_box[2])
+                    - max(top_box[0], bottom_box[0]),
+                )
+                vertical_span = (
+                    max(top_box[3], bottom_box[3])
+                    - min(top_box[1], bottom_box[1])
+                )
+                vertical_gap = bottom_box[1] - top_box[3]
+                if (
+                    horizontal_overlap >= parent_width * 0.65
+                    and vertical_span >= parent_height * 0.8
+                    and vertical_gap <= parent_height * 0.05
+                ):
+                    separator_y = (top_box[3] + bottom_box[1]) / 2
+                    if self._has_continuous_line(
+                        line_mask,
+                        separator_y,
+                        max(top_box[0], bottom_box[0]),
+                        min(top_box[2], bottom_box[2]),
+                        vertical=False,
+                    ):
+                        return True
+
+        return False
+
+    def _has_continuous_line(
+        self,
+        line_mask,
+        position,
+        span_start,
+        span_end,
+        vertical,
+    ):
+        """Đo độ liên tục của đường kẻ quanh một ranh giới cell."""
+        height, width = line_mask.shape
+        span_length = span_end - span_start
+        margin = max(2, int(span_length * 0.08))
+        radius = max(3, int(min(height, width) * 0.006))
+
+        if vertical:
+            y_start = max(0, int(round(span_start)) + margin)
+            y_end = min(height, int(round(span_end)) - margin)
+            x_start = max(0, int(round(position)) - radius)
+            x_end = min(width, int(round(position)) + radius + 1)
+            region = line_mask[y_start:y_end, x_start:x_end]
+            if region.size == 0:
+                return False
+            continuity = np.max(np.mean(region > 0, axis=0))
+        else:
+            x_start = max(0, int(round(span_start)) + margin)
+            x_end = min(width, int(round(span_end)) - margin)
+            y_start = max(0, int(round(position)) - radius)
+            y_end = min(height, int(round(position)) + radius + 1)
+            region = line_mask[y_start:y_end, x_start:x_end]
+            if region.size == 0:
+                return False
+            continuity = np.max(np.mean(region > 0, axis=1))
+
+        return continuity >= 0.7
+
+    def _box_area(self, box):
+        """Tính diện tích bbox của cell."""
+        x_min, y_min, x_max, y_max = map(float, box["coordinate"])
+        return (x_max - x_min) * (y_max - y_min)
+
     def _assign_text_to_cells(self, cell_boxes, text_regions):
         """Gán text vào cell chứa tâm của polygon text."""
         sorted_boxes = self._sort_boxes_left_to_right(cell_boxes)
