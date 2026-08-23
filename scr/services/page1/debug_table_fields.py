@@ -245,7 +245,7 @@ class DebugTableFieldsMixin:
         return self._clean_text(value_text) or None
 
     def _move_version_suffixes(self, extracted_data, field_details):
-        """Giữ version đến số cuối hoặc hậu tố A-D hợp lệ."""
+        """Giữ version đến số cuối hoặc hậu tố A-D, X hợp lệ."""
         version_parent_keys = {
             "phien_ban_ro_le": "ten_ro_le",
             "phien_ban_phan_mem": "phan_mem",
@@ -256,7 +256,7 @@ class DebugTableFieldsMixin:
             if not version_value:
                 continue
 
-            if re.search(r"\d[A-D]$", version_value):
+            if re.search(r"\d[A-DX]$", version_value, re.IGNORECASE):
                 continue
 
             integer_matches = list(re.finditer(r"\d+", version_value))
