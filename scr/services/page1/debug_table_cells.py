@@ -402,7 +402,7 @@ class DebugTableCellsMixin:
             for box in row
         ]
 
-    def _group_boxes_into_rows(self, boxes):
+    def _group_boxes_into_rows(self, boxes, use_vertical_center=False):
         """Gom bbox theo hàng và sắp xếp trái sang phải trong từng hàng."""
         if not boxes:
             return []
@@ -414,7 +414,11 @@ class DebugTableCellsMixin:
             box_items.append(
                 {
                     "box": box,
-                    "top": y_min,
+                    "top": (
+                        (y_min + y_max) / 2
+                        if use_vertical_center
+                        else y_min
+                    ),
                     "left": x_min,
                 }
             )
@@ -468,8 +472,15 @@ class DebugTableCellsMixin:
                 }
             )
 
-        ordered_boxes = self._sort_boxes_left_to_right(text_boxes)
-        return [box["text_region"] for box in ordered_boxes]
+        ordered_rows = self._group_boxes_into_rows(
+            text_boxes,
+            use_vertical_center=True,
+        )
+        return [
+            box["text_region"]
+            for row in ordered_rows
+            for box in row
+        ]
 
     def _split_cell_fields(self, cell):
         """Tách phiên bản và giữ lại text không hợp lệ trong field liên quan."""
