@@ -108,7 +108,7 @@ class DebugTableVisualizationMixin:
 </table>
 <p><strong>Text chưa gán vào cell:</strong> {unassigned_html}</p>
 <h3>Khác biệt thuộc nhóm ký tự gần giống nhau</h3>
-<p>Chỉ hiển thị token khác nhau, không có dấu tiếng Việt và khớp các nhóm dễ nhầm đã cấu hình.</p>
+<p>Chỉ hiển thị token không dấu có ký tự dễ nhầm hoặc ký tự lặp thừa/thiếu.</p>
 {comparison_html}
 <h3>Bảng chuẩn hóa: 7 hàng × 2 cột vật lý</h3>
 <p>Field bổ sung như “Phiên bản” được giữ bên trong cột phải dưới dạng field logic.</p>
@@ -137,7 +137,13 @@ class DebugTableVisualizationMixin:
                     continue
 
                 changes_text = ", ".join(
-                    f"{source} ↔ {target}"
+                    (
+                        f"bỏ {source} thừa"
+                        if not target
+                        else f"thêm {target} bị thiếu"
+                        if not source
+                        else f"{source} ↔ {target}"
+                    )
                     for source, target in confusable_changes
                 )
 

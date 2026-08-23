@@ -1,5 +1,5 @@
 # Mục đích: dùng chung quy tắc so sánh kết quả VietOCR và PP-OCRv6.
-# Chức năng: ghép token không dấu, nhận diện cặp dễ nhầm và sửa token theo PP-OCRv6.
+# Chức năng: ghép token không dấu, nhận diện ký tự dễ nhầm hoặc lặp và sửa theo PP-OCRv6.
 # Luồng xử lý: hai chuỗi OCR → token cùng vị trí → lọc dấu → so sánh hoặc thay thế.
 # Cấu hình/parameter: danh sách cặp ký tự gần giống được khai báo trong module.
 # Quan hệ: được module trích xuất field và visualization của page 1 sử dụng.
@@ -11,7 +11,7 @@ import unicodedata
 
 
 TOKEN_PATTERN = re.compile(
-    r"(?:[^\W_]|[+&`])+",
+    r"(?:[^\W_]|[+&`%])+",
     re.UNICODE,
 )
 CONFUSABLE_TEXT_PAIRS = (
@@ -25,6 +25,7 @@ CONFUSABLE_TEXT_PAIRS = (
     ("1", "7"),
     ("1", "T"),
     ("4", "+"),
+    ("%", "+"),
     ("0", "O"),
     ("0", "o"),
     ("0", "D"),
@@ -103,7 +104,7 @@ def pair_non_vietnamese_tokens(vietocr_text, ppocr_text):
 
 
 def find_confusable_changes(source_text, target_text):
-    """Trả các phép đổi ký tự gần giống nếu chúng giải thích toàn bộ sai khác."""
+    """Trả các thay đổi dễ nhầm hoặc thêm/xóa ký tự lặp hợp lệ."""
     compared_states = {}
 
     def compare(source_index, target_index):
@@ -142,6 +143,60 @@ def find_confusable_changes(source_text, target_text):
                 changes = [(source, target), *remaining_changes]
                 compared_states[state] = changes
                 return changes
+
+        if source_index < len(source_text):
+            source_character = source_text[source_index]
+            repeated_before = (
+                source_index > 0
+                and source_text[source_index - 1] == source_character
+                and target_index > 0
+                and target_text[target_index - 1] == source_character
+            )
+            repeated_after = (
+                source_index + 1 < len(source_text)
+                and source_text[source_index + 1] == source_character
+                and target_index < len(target_text)
+                and target_text[target_index] == source_character
+            )
+            if repeated_before or repeated_after:
+                remaining_changes = compare(
+                    source_index + 1,
+                    target_index,
+                )
+                if remaining_changes is not None:
+                    changes = [
+                        (source_character, ""),
+                        *remaining_changes,
+                    ]
+                    compared_states[state] = changes
+                    return changes
+
+        if target_index < len(target_text):
+            target_character = target_text[target_index]
+            repeated_before = (
+                target_index > 0
+                and target_text[target_index - 1] == target_character
+                and source_index > 0
+                and source_text[source_index - 1] == target_character
+            )
+            repeated_after = (
+                target_index + 1 < len(target_text)
+                and target_text[target_index + 1] == target_character
+                and source_index < len(source_text)
+                and source_text[source_index] == target_character
+            )
+            if repeated_before or repeated_after:
+                remaining_changes = compare(
+                    source_index,
+                    target_index + 1,
+                )
+                if remaining_changes is not None:
+                    changes = [
+                        ("", target_character),
+                        *remaining_changes,
+                    ]
+                    compared_states[state] = changes
+                    return changes
 
         compared_states[state] = None
         return None
