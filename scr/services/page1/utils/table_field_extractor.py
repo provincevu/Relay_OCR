@@ -1,84 +1,102 @@
 # Mục đích: trích xuất field TABLE 01 từ text đã gán vào cell.
-# Chức năng: khớp tên field, lấy value và ghi nhận field cần xem lại.
-# Luồng xử lý: cell theo hàng → field match → context → data chuẩn hóa.
+# Chức năng: khớp field name, sửa value bằng PP-OCR và trả metadata của cell.
+# Luồng xử lý: cell theo hàng → field match → context → value → chuẩn hóa version.
 # Cấu hình/parameter: nhận danh sách field từ table_01_fields.json.
-# Quan hệ: được Table1Analysis gọi sau bước nhận diện cell và OCR.
-# Input/output: nhận danh sách cell; trả data, field_details và review.
-# Contract: data luôn chứa đầy đủ key được khai báo trong field config.
+# Quan hệ: được Table1Analysis gọi sau bước xử lý cell và text.
+# Input/output: nhận danh sách cell; trả dict field key, value, coordinate và score.
+# Contract: output luôn chứa đầy đủ field key trong cấu hình.
 
 import re
 
 from .table_cell_utils import group_boxes_into_rows
+from .text_comparison import correct_value_with_ppocr
 
 
 class TableFieldExtractor:
-    """Trích xuất field TABLE 01 từ danh sách cell."""
+    """Trích xuất field TABLE 01 và metadata của cell chứa field."""
 
+    # Khởi tạo extractor bằng danh sách field name được cấu hình.
     def __init__(self, field_definitions):
+        """Lưu danh sách field dùng để khớp tên và context."""
         self.field_definitions = field_definitions
 
-    def empty_result(self):
-        """Tạo kết quả field rỗng theo đúng contract."""
+    # Tạo output rỗng nhưng vẫn giữ đầy đủ field key.
+    def empty_fields(self):
+        """Tạo field output rỗng theo đúng contract."""
         return {
-            "data": {
-                field["key"]: None for field in self.field_definitions
-            },
-            "field_details": {},
-            "review": [],
+            field["key"]: {
+                "value": None,
+                "coordinate": None,
+                "score": None,
+            }
+            for field in self.field_definitions
         }
 
+    # Kiểm tra text có chứa ít nhất một field name hợp lệ.
+    def has_field_name(self, text):
+        """Cho biết text có thể dùng để cứu cell score thấp hay không."""
+        return bool(self._find_field_matches(text))
+
+    # Trích xuất toàn bộ field từ danh sách cell đã OCR.
     def extract(self, cells):
-        """Trích xuất field từ text của các cell."""
-        result = self.empty_result()
-        data = result["data"]
-        field_details = result["field_details"]
-        review = result["review"]
+        """Trả field value cùng coordinate và score của cell chứa field."""
+        fields = self.empty_fields()
+        rows = group_boxes_into_rows(cells)
 
-        for row in group_boxes_into_rows(cells):
-            parsed_cells = [
-                (cell, self._find_field_matches(cell["text"]))
-                for cell in row
-            ]
-            row_context_keys = self._collect_context_keys(parsed_cells)
+        # Duyệt từng hàng để có context giữa các cell cùng hàng.
+        for row in rows:
+            parsed_cells = []
+            row_context_keys = set()
 
+            # Thu thập field match và context của toàn bộ hàng.
+            for cell in row:
+                matches = self._find_field_matches(cell["text"])
+                parsed_cells.append((cell, matches))
+
+                for match in matches:
+                    candidate_keys = {
+                        candidate["field"]["key"]
+                        for candidate in match["candidates"]
+                    }
+                    if len(candidate_keys) == 1:
+                        row_context_keys.update(candidate_keys)
+
+            # Trích xuất value của từng field trong từng cell.
             for cell, matches in parsed_cells:
-                cell_context_keys = self._collect_context_keys(
-                    [(cell, matches)]
-                )
+                cell_context_keys = set()
+                for match in matches:
+                    candidate_keys = {
+                        candidate["field"]["key"]
+                        for candidate in match["candidates"]
+                    }
+                    if len(candidate_keys) == 1:
+                        cell_context_keys.update(candidate_keys)
+
                 for match_index, match in enumerate(matches):
                     selected_candidate = self._resolve_field_candidate(
                         match,
                         cell_context_keys,
                         row_context_keys,
                     )
+
+                    # Bỏ field chưa xác định được key duy nhất theo context.
+                    if selected_candidate is None:
+                        continue
+
                     value = self._extract_field_value(
                         cell["text"],
                         matches,
                         match_index,
                     )
-                    raw_text = self._extract_field_raw_text(
-                        cell["text"],
-                        matches,
-                        match_index,
-                    )
-                    if selected_candidate is None:
-                        review.append(
-                            {
-                                "cell_index": cell["index"],
-                                "detected_field_name": match["matched_text"],
-                                "value": value,
-                                "candidate_keys": [
-                                    candidate["field"]["key"]
-                                    for candidate in match["candidates"]
-                                ],
-                                "cell_score": cell["score"],
-                                "raw_text": raw_text,
-                                "reason": "context_khong_xac_dinh",
-                            }
+                    # Chỉ sửa phần value, không sửa field name tiếng Việt.
+                    if value:
+                        value = correct_value_with_ppocr(
+                            value,
+                            cell["text_regions"],
                         )
-                        continue
 
                     field_key = selected_candidate["field"]["key"]
+                    # Không để phần Phiên bản dính vào value của Tên rơ-le.
                     if field_key == "ten_ro_le" and value:
                         version_match = re.search(
                             r"phiên\s+bản",
@@ -90,34 +108,37 @@ class TableFieldExtractor:
                                 value[:version_match.start()]
                             ) or None
 
-                    data[field_key] = value
-                    field_details[field_key] = {
-                        "matched_name": selected_candidate["name"],
-                        "detected_field_name": match["matched_text"],
-                        "cell_index": cell["index"],
-                        "cell_score": cell["score"],
-                        "raw_text": raw_text,
+                    fields[field_key] = {
+                        "value": value,
+                        "coordinate": list(cell["coordinate"]),
+                        "score": float(cell["score"]),
                     }
 
-                if not matches and ":" in cell["text"]:
-                    review.append(self._build_unmatched_review(cell))
+        self._move_version_suffixes(fields)
+        return fields
 
-        self._move_version_suffixes(data, field_details)
-        return result
-
+    # Tìm field name và loại các match ngắn bị chồng lấn.
     def _find_field_matches(self, text):
-        """Tìm field name và giữ match dài nhất khi bị chồng lấn."""
+        """Tìm field name hợp lệ trong text của một cell."""
         candidates = []
+
+        # Thử toàn bộ tên thay thế của từng field.
         for field in self.field_definitions:
             for name in field["names"]:
-                name_pattern = r"\s+".join(
-                    re.escape(part) for part in name.split()
+                name_pattern = r"(?<!\w)" + r"\s+".join(
+                    rf"{re.escape(part)}\w*"
+                    for part in name.split()
                 )
                 for match in re.finditer(
                     name_pattern,
                     text,
                     re.IGNORECASE,
                 ):
+                    is_first_field = not text[:match.start()].strip()
+                    has_colon = re.match(r"\s*:", text[match.end():])
+                    # Field nằm giữa cell chỉ hợp lệ khi có dấu hai chấm.
+                    if not is_first_field and not has_colon:
+                        continue
                     candidates.append(
                         {
                             "start": match.start(),
@@ -129,6 +150,7 @@ class TableFieldExtractor:
                     )
 
         longest_candidates = []
+        # Giữ match dài nhất tại các vùng ký tự bị chồng lấn.
         for candidate in candidates:
             candidate_length = candidate["end"] - candidate["start"]
             has_longer_overlap = any(
@@ -141,6 +163,7 @@ class TableFieldExtractor:
                 longest_candidates.append(candidate)
 
         grouped_matches = {}
+        # Gộp các field key dùng chung cùng một field name.
         for candidate in longest_candidates:
             match_key = (candidate["start"], candidate["end"])
             if match_key not in grouped_matches:
@@ -150,6 +173,7 @@ class TableFieldExtractor:
                     "matched_text": candidate["matched_text"],
                     "candidates": [],
                 }
+
             existing_keys = {
                 item["field"]["key"]
                 for item in grouped_matches[match_key]["candidates"]
@@ -162,55 +186,40 @@ class TableFieldExtractor:
             key=lambda match: match["start"],
         )
 
-    def _collect_context_keys(self, parsed_cells):
-        """Lấy các key được xác định duy nhất trong vùng context."""
-        context_keys = set()
-        for _, matches in parsed_cells:
-            for match in matches:
-                candidate_keys = {
-                    candidate["field"]["key"]
-                    for candidate in match["candidates"]
-                }
-                if len(candidate_keys) == 1:
-                    context_keys.update(candidate_keys)
-        return context_keys
-
+    # Chọn field key duy nhất bằng context của cell rồi của hàng.
     def _resolve_field_candidate(
         self,
         match,
         cell_context_keys,
         row_context_keys,
     ):
-        """Chọn field duy nhất theo context của cell rồi của hàng."""
+        """Chọn field candidate phù hợp với context gần nhất."""
         if len(match["candidates"]) == 1:
             return match["candidates"][0]
 
-        cell_candidates = self._filter_candidates(
-            match["candidates"],
-            cell_context_keys,
-        )
+        cell_candidates = [
+            candidate
+            for candidate in match["candidates"]
+            if set(candidate["field"].get("context_keys", []))
+            & cell_context_keys
+        ]
         if len(cell_candidates) == 1:
             return cell_candidates[0]
 
-        row_candidates = self._filter_candidates(
-            match["candidates"],
-            row_context_keys,
-        )
+        row_candidates = [
+            candidate
+            for candidate in match["candidates"]
+            if set(candidate["field"].get("context_keys", []))
+            & row_context_keys
+        ]
         if len(row_candidates) == 1:
             return row_candidates[0]
+
         return None
 
-    def _filter_candidates(self, candidates, context_keys):
-        """Lọc candidate có context key phù hợp."""
-        return [
-            candidate
-            for candidate in candidates
-            if set(candidate["field"].get("context_keys", []))
-            & context_keys
-        ]
-
+    # Cắt value từ cuối field name đến field name kế tiếp.
     def _extract_field_value(self, text, matches, match_index):
-        """Lấy value từ cuối field name đến field name kế tiếp."""
+        """Lấy value tương ứng với một field match."""
         match = matches[match_index]
         value_end = (
             matches[match_index + 1]["start"]
@@ -220,88 +229,61 @@ class TableFieldExtractor:
         value_text = text[match["end"]:value_end]
         if ":" in value_text:
             value_text = value_text.split(":", 1)[1]
+
         return self._clean_text(value_text) or None
 
-    def _extract_field_raw_text(self, text, matches, match_index):
-        """Lấy raw text của field hiện tại."""
-        raw_text_end = (
-            matches[match_index + 1]["start"]
-            if match_index + 1 < len(matches)
-            else len(text)
-        )
-        raw_text = text[matches[match_index]["start"]:raw_text_end]
-        return self._clean_text(raw_text)
-
-    def _build_unmatched_review(self, cell):
-        """Tạo dữ liệu review cho cell không khớp field config."""
-        detected_name, value = cell["text"].split(":", 1)
-        return {
-            "cell_index": cell["index"],
-            "detected_field_name": self._clean_text(detected_name),
-            "value": self._clean_text(value) or None,
-            "cell_score": cell["score"],
-            "raw_text": cell["text"],
-            "reason": "khong_khop_names",
-        }
-
-    def _move_version_suffixes(self, data, field_details):
-        """Chuyển text sau version về field cha tương ứng."""
+    # Giữ hậu tố version hợp lệ và chuyển phần dư về field cha.
+    def _move_version_suffixes(self, fields):
+        """Chuẩn hóa suffix của version rơ-le và phần mềm."""
         version_parent_keys = {
             "phien_ban_ro_le": "ten_ro_le",
             "phien_ban_phan_mem": "phan_mem",
         }
+
+        # Xử lý độc lập từng cặp field version và field cha.
         for version_key, parent_key in version_parent_keys.items():
-            version_value = data[version_key]
+            version_field = fields[version_key]
+            version_value = version_field["value"]
             if not version_value:
                 continue
 
+            # A-D và X là hậu tố hợp lệ của field phiên bản.
+            if re.search(r"\d[A-DX]$", version_value, re.IGNORECASE):
+                continue
+
             integer_matches = list(re.finditer(r"\d+", version_value))
-            if not integer_matches:
-                continue
+            version_coordinate = version_field["coordinate"]
+            version_score = version_field["score"]
 
-            last_integer_end = integer_matches[-1].end()
-            suffix = self._clean_text(version_value[last_integer_end:])
-            if not suffix:
-                continue
+            # Giữ version đến số cuối và lấy phần còn lại làm suffix.
+            if integer_matches:
+                last_integer_end = integer_matches[-1].end()
+                suffix = self._clean_text(
+                    version_value[last_integer_end:]
+                )
+                if not suffix:
+                    continue
+                version_field["value"] = self._clean_text(
+                    version_value[:last_integer_end]
+                )
+            else:
+                suffix = version_value
+                version_field["value"] = None
+                version_field["coordinate"] = None
+                version_field["score"] = None
 
-            data[version_key] = self._clean_text(
-                version_value[:last_integer_end]
-            )
-            parent_value = data[parent_key] or ""
-            data[parent_key] = self._clean_text(
+            parent_field = fields[parent_key]
+            parent_value = parent_field["value"] or ""
+            parent_field["value"] = self._clean_text(
                 f"{parent_value} {suffix}"
             )
-            self._update_version_details(
-                version_key,
-                parent_key,
-                suffix,
-                field_details,
-            )
 
-    def _update_version_details(
-        self,
-        version_key,
-        parent_key,
-        suffix,
-        field_details,
-    ):
-        """Cập nhật raw text sau khi chuyển suffix của version."""
-        version_detail = field_details.get(version_key)
-        if version_detail:
-            integer_matches = list(
-                re.finditer(r"\d+", version_detail["raw_text"])
-            )
-            if integer_matches:
-                version_detail["raw_text"] = self._clean_text(
-                    version_detail["raw_text"][:integer_matches[-1].end()]
-                )
+            # Dùng metadata của version nếu field cha chưa có cell nguồn.
+            if parent_field["coordinate"] is None:
+                parent_field["coordinate"] = version_coordinate
+                parent_field["score"] = version_score
 
-        parent_detail = field_details.get(parent_key)
-        if parent_detail:
-            parent_detail["raw_text"] = self._clean_text(
-                f"{parent_detail['raw_text']} {suffix}"
-            )
-
+    # Gom khoảng trắng thừa nhưng không thay đổi nội dung OCR.
     def _clean_text(self, text):
-        """Gom khoảng trắng thừa nhưng giữ nguyên nội dung OCR."""
+        """Chuẩn hóa khoảng trắng trong field name và value."""
         return " ".join(text.split())

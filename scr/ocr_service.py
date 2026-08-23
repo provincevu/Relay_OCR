@@ -3,32 +3,41 @@ import numpy as np
 
 from .services.detector import Detector
 from .services.image_preprocessing import ImagePreprocessing
+from .services.page1.table_1_analysis import Table1Analysis
 from .services.recognitor import Recognitor
 
 # Mục đích: cung cấp dịch vụ OCR kết hợp tiền xử lý, detection và recognition.
-# Chức năng: phát hiện vùng văn bản qua detect_text() và nhận dạng từng vùng qua recognize_text().
-# Luồng xử lý: ảnh đầu vào → ImagePreprocessing → Detector → cắt dt_polys → Recognitor.
-# Cấu hình: nhận một dict config và truyền cùng cấu hình đó cho ba thành phần bên dưới.
-# Quan hệ: được gọi từ tầng sử dụng OCR; phụ thuộc ImagePreprocessing, Detector và Recognitor.
-# Input/output: nhận đường dẫn ảnh; detect_text() trả kết quả PaddleOCR, recognize_text() trả danh sách box/text.
-# Contract: giữ tên hai phương thức, khóa dt_polys của kết quả detection và dạng kết quả box/text.
+# Chức năng: OCR text thông thường và trích xuất field TABLE 01 trên page 1.
+# Luồng xử lý: ảnh đầu vào → preprocessing → OCR text hoặc Table1Analysis.
+# Cấu hình: nhận một dict config và truyền cho các service bên dưới.
+# Quan hệ: phối hợp ImagePreprocessing, Detector, Recognitor và Table1Analysis.
+# Input/output: nhận đường dẫn ảnh; trả text hoặc fields/table trong bộ nhớ.
+# Contract: giữ detect_text(), recognize_text() và bổ sung analyze_page1().
 
 
 class OCRService:
     """Dịch vụ OCR kết hợp phát hiện và nhận dạng văn bản."""
 
+    # Khởi tạo các service và dùng chung model text cho TABLE 01.
     def __init__(self, config):
         self.config = config
         self.image_preprocessing = ImagePreprocessing(config)
         self.detector = Detector(config)
         self.recognitor = Recognitor(config)
+        self.table_1_analysis = Table1Analysis(
+            config,
+            self.detector,
+            self.recognitor,
+        )
 
+    # Phát hiện các vùng text trên ảnh đã tiền xử lý.
     def detect_text(self, image):
         # Tiền xử lý ảnh trước khi phát hiện vùng văn bản
         processed_image = self.image_preprocessing.preprocess(image)
         results = self.detector.detect(processed_image)
         return results
 
+    # Nhận dạng text trong toàn bộ polygon được phát hiện.
     def recognize_text(self, image):
         # Tiền xử lý ảnh trước khi detection và recognition
         processed_image = self.image_preprocessing.preprocess(image)
@@ -36,6 +45,7 @@ class OCRService:
         detection_results = self.detector.detect(processed_image)
         results = []
 
+        # Duyệt các polygon text và nhận dạng riêng từng crop.
         for result in detection_results:
             for box in result["dt_polys"]:
                 box = np.array(box, dtype=np.float32)
@@ -51,3 +61,9 @@ class OCRService:
                 results.append({"box": box.tolist(), "text": text})
 
         return results
+
+    # Trích xuất field TABLE 01 từ ảnh page 1.
+    def analyze_page1(self, image_path):
+        """Trả fields và table của page 1 mà không tạo output file."""
+        image = cv2.imread(str(image_path))
+        return self.table_1_analysis.analyze(image)
