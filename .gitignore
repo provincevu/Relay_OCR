@@ -39,6 +39,7 @@ temp/
 
 # Data
 data/*
+*.yml
 
 # Agents
 AGENTS.md

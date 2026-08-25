@@ -59,9 +59,10 @@ def main():
             document_output_directory.glob("page_*.png")
         )
         if not rendered_pages:
-            raise FileNotFoundError(
-                f"Không tạo được ảnh page 3+: {pdf_file.name}"
+            print(
+                f"Bỏ qua {pdf_file.name}: không có page {FIRST_PAGE} trở đi."
             )
+            continue
 
         print(
             f"Đã tạo {len(rendered_pages)} ảnh cho {pdf_file.name}: "

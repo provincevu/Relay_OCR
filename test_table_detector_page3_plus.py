@@ -1,10 +1,10 @@
 # Mục đích: debug nhận diện cấu trúc bảng trên một ảnh page 3+.
-# Chức năng: tìm bảng, phân loại wired/wireless, chọn SLANeXt và vẽ kết quả.
+# Chức năng: xử lý ảnh bằng layout hoặc vùng content, chọn SLANeXt và vẽ kết quả.
 # Luồng xử lý: ảnh page → table crop → classification → structure → ảnh debug.
-# Cấu hình/parameter: đường dẫn ảnh nhận từ command line; model chạy trên CPU.
+# Cấu hình/parameter: nhận ảnh, --all-page-001 và tùy chọn --content-region.
 # Quan hệ: script độc lập, không sử dụng pipeline hoặc module phân tích page 1.
-# Input/output: đọc một ảnh page; ghi ảnh trực quan vào output/table_3plus_debug.
-# Contract: mỗi bảng hiển thị loại bảng, classification score và structure score.
+# Input/output: đọc ảnh page 3+; ghi ảnh debug và HTML structure vào output.
+# Contract: ảnh hiển thị loại bảng; content mode lưu HTML structure thực tế.
 
 import argparse
 from pathlib import Path
@@ -23,13 +23,7 @@ class Page3PlusTableAnalyzer:
 
     def __init__(self):
         """Khởi tạo các model dùng cho luồng debug."""
-        self.layout_detector = LayoutDetection(
-            model_name="PicoDet_layout_1x_table",
-            device="cpu",
-            engine="paddle_static",
-            enable_mkldnn=False,
-            cpu_threads=6,
-        )
+        self.layout_detector = None
         self.table_classifier = TableClassification(
             model_name="PP-LCNet_x1_0_table_cls",
             device="cpu",
@@ -40,22 +34,46 @@ class Page3PlusTableAnalyzer:
         self.wired_structure_model = None
         self.wireless_structure_model = None
 
-    def analyze(self, image):
+    def analyze(self, image, use_content_region=False):
         """Trả ảnh đã vẽ kết quả phân loại và nhận diện cấu trúc bảng."""
         visualization = image.copy()
-        layout_results = self.layout_detector.predict(
-            image,
-            batch_size=1,
-            layout_nms=True,
-        )
-        table_boxes = []
-
-        for layout_result in layout_results:
-            table_boxes.extend(
-                box
-                for box in layout_result["boxes"]
-                if box["label"].lower() == "table"
+        if use_content_region:
+            image_height, image_width = image.shape[:2]
+            margin_x = int(image_width * 0.05)
+            margin_y = int(image_height * 0.05)
+            table_boxes = [
+                {
+                    "coordinate": [
+                        margin_x,
+                        margin_y,
+                        image_width - margin_x,
+                        image_height - margin_y,
+                    ],
+                }
+            ]
+        else:
+            if self.layout_detector is None:
+                self.layout_detector = LayoutDetection(
+                    model_name="PicoDet_layout_1x_table",
+                    device="cpu",
+                    engine="paddle_static",
+                    enable_mkldnn=False,
+                    cpu_threads=6,
+                )
+            layout_results = self.layout_detector.predict(
+                image,
+                batch_size=1,
+                threshold=0.3,
+                layout_nms=True,
             )
+            table_boxes = []
+
+            for layout_result in layout_results:
+                table_boxes.extend(
+                    box
+                    for box in layout_result["boxes"]
+                    if box["label"].lower() == "table"
+                )
 
         table_boxes = sorted(
             table_boxes,
@@ -64,6 +82,7 @@ class Page3PlusTableAnalyzer:
                 float(box["coordinate"][0]),
             ),
         )
+        structure_outputs = []
 
         for table_index, table_box in enumerate(table_boxes, start=1):
             x_min, y_min, x_max, y_max = map(
@@ -122,6 +141,16 @@ class Page3PlusTableAnalyzer:
             structure_score = float(
                 structure_result["structure_score"]
             )
+            structure_outputs.append(
+                {
+                    "table_index": table_index,
+                    "table_type": table_type,
+                    "classification_score": classification_score,
+                    "model_name": model_name,
+                    "structure_score": structure_score,
+                    "html": "".join(structure_result["structure"]),
+                }
+            )
             cv2.rectangle(
                 visualization,
                 (x_min, y_min),
@@ -171,40 +200,118 @@ class Page3PlusTableAnalyzer:
                 cv2.LINE_AA,
             )
 
-        return visualization
+        return visualization, structure_outputs
 
 
 def parse_arguments():
-    """Đọc đường dẫn ảnh page cần phân tích."""
+    """Đọc chế độ và đường dẫn ảnh page cần phân tích."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("image_path", type=Path)
-    return parser.parse_args()
+    parser.add_argument("image_path", nargs="?", type=Path)
+    parser.add_argument("--all-page-001", action="store_true")
+    parser.add_argument("--content-region", action="store_true")
+    arguments = parser.parse_args()
+
+    if arguments.all_page_001 == (arguments.image_path is not None):
+        parser.error(
+            "Phải truyền image_path hoặc --all-page-001."
+        )
+
+    return arguments
 
 
 def main():
-    """Chạy phân tích một ảnh page và lưu ảnh trực quan."""
+    """Chạy phân tích ảnh page và lưu ảnh trực quan."""
     arguments = parse_arguments()
-    image = cv2.imread(str(arguments.image_path))
-    if image is None:
-        raise FileNotFoundError(
-            f"Không đọc được ảnh: {arguments.image_path}"
+    if arguments.all_page_001:
+        input_directory = Path("./data/pdf/page3plus_png")
+        image_paths = sorted(
+            input_directory.glob("P_*/page_001.png"),
+            key=lambda path: path.parent.name,
         )
+        if not image_paths:
+            raise FileNotFoundError(
+                f"Không tìm thấy ảnh page_001 trong: {input_directory}"
+            )
+        if arguments.content_region:
+            output_directory = Path(
+                "./output/table_3plus_debug/page_001_content"
+            )
+        else:
+            output_directory = Path(
+                "./output/table_3plus_debug/page_001"
+            )
+    else:
+        image_paths = [arguments.image_path]
+        output_directory = (
+            Path("./output/table_3plus_debug")
+            / arguments.image_path.parent.name
+        )
+        if arguments.content_region:
+            output_directory /= "content"
 
-    analyzer = Page3PlusTableAnalyzer()
-    visualization = analyzer.analyze(image)
-    output_directory = (
-        Path("./output/table_3plus_debug")
-        / arguments.image_path.parent.name
-    )
     output_directory.mkdir(parents=True, exist_ok=True)
-    output_path = output_directory / (
-        f"{arguments.image_path.stem}_analysis.png"
-    )
-    saved = cv2.imwrite(str(output_path), visualization)
-    if not saved:
-        raise RuntimeError(f"Không lưu được ảnh: {output_path}")
+    analyzer = Page3PlusTableAnalyzer()
 
-    print(f"Ảnh trực quan: {output_path}")
+    for image_index, image_path in enumerate(image_paths, start=1):
+        print(
+            f"[{image_index}/{len(image_paths)}] Đang xử lý: "
+            f"{image_path}"
+        )
+        image = cv2.imread(str(image_path))
+        if image is None:
+            raise FileNotFoundError(f"Không đọc được ảnh: {image_path}")
+
+        visualization, structure_outputs = analyzer.analyze(
+            image,
+            use_content_region=arguments.content_region,
+        )
+        if arguments.all_page_001:
+            output_stem = (
+                f"{image_path.parent.name}_{image_path.stem}"
+            )
+        else:
+            output_stem = image_path.stem
+        output_path = output_directory / f"{output_stem}_analysis.png"
+        saved = cv2.imwrite(str(output_path), visualization)
+        if not saved:
+            raise RuntimeError(f"Không lưu được ảnh: {output_path}")
+
+        print(f"Ảnh trực quan: {output_path}")
+
+        if arguments.content_region:
+            for structure_output in structure_outputs:
+                metadata_html = f"""
+<style>
+body {{ font-family: Arial, sans-serif; margin: 24px; }}
+table {{ border-collapse: collapse; margin-top: 20px; }}
+td {{ border: 1px solid #111; min-width: 80px; height: 20px; }}
+</style>
+<h1>{image_path.parent.name} / {image_path.name}</h1>
+<p>
+Loại bảng: {structure_output['table_type']} |
+classification score: {structure_output['classification_score']:.4f} |
+model: {structure_output['model_name']} |
+structure score: {structure_output['structure_score']:.4f}
+</p>
+"""
+                structure_html = structure_output["html"].replace(
+                    "<body>",
+                    (
+                        '<head><meta charset="utf-8"></head>'
+                        f"<body>{metadata_html}"
+                    ),
+                    1,
+                )
+                structure_path = output_directory / (
+                    f"{output_stem}_structure.html"
+                )
+                structure_path.write_text(
+                    structure_html,
+                    encoding="utf-8",
+                )
+                print(f"HTML structure: {structure_path}")
+
+    print(f"Đã xử lý {len(image_paths)} ảnh.")
 
 
 if __name__ == "__main__":
