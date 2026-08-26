@@ -1,12 +1,13 @@
 # Mục đích: debug nhận diện cấu trúc bảng trên một ảnh page 3+.
-# Chức năng: xử lý ảnh bằng layout hoặc vùng content, chọn SLANeXt và vẽ kết quả.
-# Luồng xử lý: ảnh page → table crop → classification → structure → ảnh debug.
+# Chức năng: xử lý ảnh, chọn SLANeXt, OCR và xuất wired_table thành HTML.
+# Luồng xử lý: ảnh → table crop → classification → structure/OCR → ảnh và HTML.
 # Cấu hình/parameter: nhận ảnh, --all-page-001 và tùy chọn --content-region.
 # Quan hệ: script độc lập, không sử dụng pipeline hoặc module phân tích page 1.
-# Input/output: đọc ảnh page 3+; ghi ảnh debug và HTML structure vào output.
-# Contract: ảnh hiển thị loại bảng; content mode lưu HTML structure thực tế.
+# Input/output: đọc ảnh page 3+; ghi ảnh debug và một HTML chung vào output.
+# Contract: wired_table dùng SLANeXt_wired, PP-OCRv6 và được gom vào một HTML.
 
 import argparse
+from html import escape
 from pathlib import Path
 
 import cv2
@@ -15,6 +16,8 @@ from paddleocr import (
     LayoutDetection,
     TableClassification,
     TableStructureRecognition,
+    TextDetection,
+    TextRecognition,
 )
 
 
@@ -33,6 +36,147 @@ class Page3PlusTableAnalyzer:
         )
         self.wired_structure_model = None
         self.wireless_structure_model = None
+        self.text_detector = None
+        self.text_recognizer = None
+
+    def _recognize_text(self, image):
+        """Nhận diện các vùng text và nội dung bằng PP-OCRv6 medium."""
+        if self.text_detector is None:
+            self.text_detector = TextDetection(
+                model_name="PP-OCRv6_medium_det",
+                device="cpu",
+                engine="paddle_static",
+                enable_mkldnn=False,
+                cpu_threads=6,
+            )
+            self.text_recognizer = TextRecognition(
+                model_name="PP-OCRv6_medium_rec",
+                device="cpu",
+                engine="paddle_static",
+                enable_mkldnn=False,
+                cpu_threads=6,
+            )
+
+        text_regions = []
+        image_height, image_width = image.shape[:2]
+        detection_results = self.text_detector.predict(
+            input=image,
+            limit_side_len=1600,
+            limit_type="max",
+            thresh=0.3,
+            box_thresh=0.6,
+            unclip_ratio=2.0,
+        )
+
+        for detection_result in detection_results:
+            for polygon in detection_result["dt_polys"]:
+                polygon = np.array(polygon, dtype=np.float32)
+                x_min, y_min = polygon.min(axis=0).astype(int)
+                x_max, y_max = polygon.max(axis=0).astype(int)
+                x_min = max(x_min, 0)
+                y_min = max(y_min, 0)
+                x_max = min(x_max, image_width)
+                y_max = min(y_max, image_height)
+                text_crop = image[y_min:y_max, x_min:x_max]
+                recognition_result = self.text_recognizer.predict(
+                    input=text_crop,
+                    batch_size=1,
+                )[0]
+                text_regions.append(
+                    {
+                        "box": [x_min, y_min, x_max, y_max],
+                        "center": [
+                            float(polygon[:, 0].mean()),
+                            float(polygon[:, 1].mean()),
+                        ],
+                        "text": recognition_result["rec_text"],
+                        "score": float(recognition_result["rec_score"]),
+                    }
+                )
+
+        return text_regions
+
+    def _fill_structure_html(self, structure_html, cell_boxes, text_regions):
+        """Khớp text với cell gần nhất và điền vào HTML structure."""
+        cell_text_regions = [[] for _ in cell_boxes]
+        normalized_cell_boxes = []
+
+        for cell_box in cell_boxes:
+            cell_polygon = np.array(
+                cell_box,
+                dtype=np.float32,
+            ).reshape(-1, 2)
+            normalized_cell_boxes.append(
+                [
+                    float(cell_polygon[:, 0].min()),
+                    float(cell_polygon[:, 1].min()),
+                    float(cell_polygon[:, 0].max()),
+                    float(cell_polygon[:, 1].max()),
+                ]
+            )
+
+        for text_region in text_regions:
+            text_box = text_region["box"]
+            matching_scores = []
+
+            for cell_index, cell_box in enumerate(normalized_cell_boxes):
+                intersection_width = max(
+                    0,
+                    min(cell_box[2], text_box[2])
+                    - max(cell_box[0], text_box[0]),
+                )
+                intersection_height = max(
+                    0,
+                    min(cell_box[3], text_box[3])
+                    - max(cell_box[1], text_box[1]),
+                )
+                intersection_area = intersection_width * intersection_height
+                cell_area = (
+                    (cell_box[2] - cell_box[0])
+                    * (cell_box[3] - cell_box[1])
+                )
+                text_area = (
+                    (text_box[2] - text_box[0])
+                    * (text_box[3] - text_box[1])
+                )
+                union_area = cell_area + text_area - intersection_area
+                iou = intersection_area / union_area
+                distance = (
+                    abs(text_box[0] - cell_box[0])
+                    + abs(text_box[1] - cell_box[1])
+                    + abs(text_box[2] - cell_box[2])
+                    + abs(text_box[3] - cell_box[3])
+                )
+                matching_scores.append((1.0 - iou, distance, cell_index))
+
+            _, _, cell_index = min(matching_scores)
+            cell_text_regions[cell_index].append(text_region)
+
+        cell_texts = []
+        for regions in cell_text_regions:
+            regions.sort(
+                key=lambda region: (
+                    region["center"][1],
+                    region["center"][0],
+                )
+            )
+            cell_texts.append(
+                " ".join(region["text"] for region in regions)
+            )
+
+        html_parts = structure_html.split("</td>")
+        if len(html_parts) - 1 != len(cell_texts):
+            raise ValueError(
+                "Số cell bbox không khớp số thẻ td của SLANeXt_wired."
+            )
+
+        filled_parts = []
+        for html_part, cell_text in zip(html_parts[:-1], cell_texts):
+            filled_parts.append(
+                f"{html_part}{escape(cell_text)}</td>"
+            )
+
+        return "".join(filled_parts) + html_parts[-1]
 
     def analyze(self, image, use_content_region=False):
         """Trả ảnh đã vẽ kết quả phân loại và nhận diện cấu trúc bảng."""
@@ -141,6 +285,18 @@ class Page3PlusTableAnalyzer:
             structure_score = float(
                 structure_result["structure_score"]
             )
+            structure_html = "".join(structure_result["structure"])
+            ocr_count = 0
+
+            if table_type == "wired_table":
+                text_regions = self._recognize_text(table_crop)
+                structure_html = self._fill_structure_html(
+                    structure_html,
+                    structure_result["bbox"],
+                    text_regions,
+                )
+                ocr_count = len(text_regions)
+
             structure_outputs.append(
                 {
                     "table_index": table_index,
@@ -148,7 +304,8 @@ class Page3PlusTableAnalyzer:
                     "classification_score": classification_score,
                     "model_name": model_name,
                     "structure_score": structure_score,
-                    "html": "".join(structure_result["structure"]),
+                    "ocr_count": ocr_count,
+                    "html": structure_html,
                 }
             )
             cv2.rectangle(
@@ -220,7 +377,7 @@ def parse_arguments():
 
 
 def main():
-    """Chạy phân tích ảnh page và lưu ảnh trực quan."""
+    """Chạy phân tích ảnh page, lưu ảnh và HTML của các wired_table."""
     arguments = parse_arguments()
     if arguments.all_page_001:
         input_directory = Path("./data/pdf/page3plus_png")
@@ -251,6 +408,7 @@ def main():
 
     output_directory.mkdir(parents=True, exist_ok=True)
     analyzer = Page3PlusTableAnalyzer()
+    wired_table_sections = []
 
     for image_index, image_path in enumerate(image_paths, start=1):
         print(
@@ -278,38 +436,81 @@ def main():
 
         print(f"Ảnh trực quan: {output_path}")
 
-        if arguments.content_region:
-            for structure_output in structure_outputs:
-                metadata_html = f"""
-<style>
-body {{ font-family: Arial, sans-serif; margin: 24px; }}
-table {{ border-collapse: collapse; margin-top: 20px; }}
-td {{ border: 1px solid #111; min-width: 80px; height: 20px; }}
-</style>
-<h1>{image_path.parent.name} / {image_path.name}</h1>
-<p>
-Loại bảng: {structure_output['table_type']} |
-classification score: {structure_output['classification_score']:.4f} |
-model: {structure_output['model_name']} |
-structure score: {structure_output['structure_score']:.4f}
-</p>
+        for structure_output in structure_outputs:
+            if structure_output["table_type"] != "wired_table":
+                continue
+
+            structure_html = structure_output["html"]
+            table_start = structure_html.index("<table")
+            table_end = structure_html.index("</table>") + len("</table>")
+            table_html = structure_html[table_start:table_end]
+            wired_table_sections.append(
+                f"""
+<section>
+    <h2>{image_path.parent.name} / {image_path.name}</h2>
+    <p class="metadata">
+        Loại bảng: wired_table |
+        classification score: {structure_output['classification_score']:.4f} |
+        model: {structure_output['model_name']} |
+        structure score: {structure_output['structure_score']:.4f} |
+        OCR: PP-OCRv6_medium_det + PP-OCRv6_medium_rec |
+        text regions: {structure_output['ocr_count']}
+    </p>
+    <img src="{output_path.name}" alt="Ảnh phân tích {output_stem}">
+    <h3>Cấu trúc bảng</h3>
+    {table_html}
+</section>
 """
-                structure_html = structure_output["html"].replace(
-                    "<body>",
-                    (
-                        '<head><meta charset="utf-8"></head>'
-                        f"<body>{metadata_html}"
-                    ),
-                    1,
-                )
-                structure_path = output_directory / (
-                    f"{output_stem}_structure.html"
-                )
-                structure_path.write_text(
-                    structure_html,
-                    encoding="utf-8",
-                )
-                print(f"HTML structure: {structure_path}")
+            )
+
+    wired_table_html = f"""<!doctype html>
+<html lang="vi">
+<head>
+    <meta charset="utf-8">
+    <title>Phân tích wired_table bằng SLANeXt_wired</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            margin: 24px;
+            color: #222;
+        }}
+        section {{
+            border-top: 2px solid #777;
+            margin-top: 32px;
+            padding-top: 20px;
+        }}
+        .metadata {{ color: #444; }}
+        img {{
+            border: 1px solid #bbb;
+            display: block;
+            height: auto;
+            margin: 16px 0;
+            max-width: 100%;
+        }}
+        table {{
+            border-collapse: collapse;
+            margin-top: 16px;
+            width: 100%;
+        }}
+        td, th {{
+            border: 1px solid #111;
+            min-width: 40px;
+            height: 24px;
+            padding: 4px 8px;
+            vertical-align: top;
+        }}
+    </style>
+</head>
+<body>
+    <h1>Phân tích wired_table bằng SLANeXt_wired</h1>
+    <p>Tổng số bảng: {len(wired_table_sections)}</p>
+    {''.join(wired_table_sections)}
+</body>
+</html>
+"""
+    wired_table_path = output_directory / "wired_table_analysis.html"
+    wired_table_path.write_text(wired_table_html, encoding="utf-8")
+    print(f"HTML wired_table: {wired_table_path}")
 
     print(f"Đã xử lý {len(image_paths)} ảnh.")
 
