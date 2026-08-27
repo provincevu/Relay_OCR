@@ -1,5 +1,5 @@
 # Mục đích: thử nghiệm trích xuất cặp key-value từ ảnh page 3+.
-# Chức năng: OCR, gom text theo hàng, ghép key-value và tạo HTML trực quan.
+# Chức năng: OCR, ghép key-value, đo thời gian và tạo HTML trực quan.
 # Luồng xử lý: ảnh → OCR → gom hàng → nhận diện schema/biểu thức/cột → HTML.
 # Cấu hình/parameter: nhận một image_path hoặc --all-page-001.
 # Quan hệ: script độc lập, không sử dụng SLANeXt hoặc Page1TableAnalyzer.
@@ -11,6 +11,7 @@ import json
 import re
 from html import escape
 from pathlib import Path
+from time import perf_counter
 
 import cv2
 import numpy as np
@@ -260,7 +261,9 @@ class Page3PlusKeyValueExtractor:
         text_regions = []
         pending_regions = []
         text_crops = []
+        timings = {}
         image_height, image_width = image.shape[:2]
+        detection_started = perf_counter()
         detection_results = self.text_detector.predict(
             input=image,
             limit_side_len=3200,
@@ -269,7 +272,9 @@ class Page3PlusKeyValueExtractor:
             box_thresh=0.6,
             unclip_ratio=1.5,
         )
+        timings["Text detection"] = perf_counter() - detection_started
 
+        crop_started = perf_counter()
         for detection_result in detection_results:
             for polygon in detection_result["dt_polys"]:
                 polygon = np.array(polygon, dtype=np.float32)
@@ -290,10 +295,13 @@ class Page3PlusKeyValueExtractor:
                         ],
                     }
                 )
+        timings["Tạo text crop"] = perf_counter() - crop_started
 
         if not text_crops:
-            return text_regions
+            timings["Text recognition"] = 0.0
+            return text_regions, timings
 
+        recognition_started = perf_counter()
         recognition_results = self.text_recognizer.predict(
             input=text_crops,
             batch_size=8,
@@ -313,8 +321,9 @@ class Page3PlusKeyValueExtractor:
                     "score": float(recognition_result["rec_score"]),
                 }
             )
+        timings["Text recognition"] = perf_counter() - recognition_started
 
-        return text_regions
+        return text_regions, timings
 
     def _extract_assignments(self, row, current_group):
         """Trích xuất tất cả biểu thức KEY = VALUE trên một hàng."""
@@ -460,7 +469,8 @@ class Page3PlusKeyValueExtractor:
     def extract(self, image):
         """Trả danh sách cặp key-value và ảnh đánh dấu kết quả."""
         image_width = image.shape[1]
-        text_regions = self._recognize_text(image)
+        text_regions, timings = self._recognize_text(image)
+        extraction_started = perf_counter()
         text_regions.sort(
             key=lambda region: (
                 region["center"][1],
@@ -550,6 +560,8 @@ class Page3PlusKeyValueExtractor:
                 ):
                     current_group = group
 
+        timings["Ghép key-value"] = perf_counter() - extraction_started
+        visualization_started = perf_counter()
         visualization = image.copy()
         for index, region in enumerate(text_regions, start=1):
             x_min, y_min, x_max, y_max = region["box"]
@@ -608,7 +620,8 @@ class Page3PlusKeyValueExtractor:
 
         for record in records:
             record.pop("center_y")
-        return records, visualization, text_regions
+        timings["Vẽ ảnh debug"] = perf_counter() - visualization_started
+        return records, visualization, text_regions, timings
 
 
 def parse_arguments():
@@ -662,6 +675,15 @@ def build_html(sections, total_items):
 """
 
 
+def print_image_timings(image_path, timings, total_seconds):
+    """In thời gian và tỷ lệ phần trăm của từng stage trên một ảnh."""
+    print(f"Thời gian xử lý: {image_path}")
+    for stage_name, seconds in timings.items():
+        percentage = seconds / total_seconds * 100 if total_seconds else 0
+        print(f"  - {stage_name}: {seconds:.2f}s ({percentage:.1f}%)")
+    print(f"  - Tổng: {total_seconds:.2f}s")
+
+
 def main():
     """Chạy OCR, trích xuất key-value và lưu một HTML chung."""
     arguments = parse_arguments()
@@ -683,24 +705,42 @@ def main():
         raise FileNotFoundError("Không tìm thấy ảnh page_001 để xử lý.")
 
     output_directory.mkdir(parents=True, exist_ok=True)
+    model_initialization_started = perf_counter()
     extractor = Page3PlusKeyValueExtractor()
+    model_initialization_seconds = (
+        perf_counter() - model_initialization_started
+    )
+    print(
+        "Khởi tạo detector và recognizer: "
+        f"{model_initialization_seconds:.2f}s"
+    )
     sections = []
     total_items = 0
 
     for image_index, image_path in enumerate(image_paths, start=1):
+        image_started = perf_counter()
+        timings = {}
         print(f"[{image_index}/{len(image_paths)}] Đang xử lý: {image_path}")
+        image_read_started = perf_counter()
         image = cv2.imread(str(image_path))
         if image is None:
             raise FileNotFoundError(f"Không đọc được ảnh: {image_path}")
+        timings["Đọc ảnh"] = perf_counter() - image_read_started
 
-        records, visualization, text_regions = extractor.extract(image)
+        records, visualization, text_regions, extraction_timings = (
+            extractor.extract(image)
+        )
+        timings.update(extraction_timings)
         source_name = image_path.parent.name
         output_stem = f"{source_name}_{image_path.stem}"
         visualization_path = output_directory / f"{output_stem}_key_value.png"
+        image_save_started = perf_counter()
         saved = cv2.imwrite(str(visualization_path), visualization)
         if not saved:
             raise RuntimeError(f"Không lưu được ảnh: {visualization_path}")
+        timings["Lưu ảnh PNG"] = perf_counter() - image_save_started
 
+        html_section_started = perf_counter()
         table_rows = []
         for record_index, record in enumerate(records, start=1):
             metadata = json.dumps(
@@ -759,13 +799,19 @@ def main():
 """
         )
         total_items += len(records)
+        timings["Chuẩn bị HTML"] = perf_counter() - html_section_started
+        total_seconds = perf_counter() - image_started
+        print_image_timings(image_path, timings, total_seconds)
 
     html_path = output_directory / "key_value_analysis.html"
+    html_write_started = perf_counter()
     html_path.write_text(
         build_html(sections, total_items),
         encoding="utf-8",
     )
+    html_write_seconds = perf_counter() - html_write_started
     print(f"HTML key-value: {html_path}")
+    print(f"Tạo và ghi HTML chung: {html_write_seconds:.2f}s")
     print(f"Đã xử lý {len(image_paths)} ảnh, tìm thấy {total_items} cặp.")
 
 
