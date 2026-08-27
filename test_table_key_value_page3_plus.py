@@ -79,28 +79,22 @@ def estimate_sub_box(region, start_index, end_index):
 
 
 def group_text_rows(text_regions):
-    """Gom các vùng OCR có độ chồng theo trục dọc vào cùng một hàng."""
+    """Gom vùng OCR theo khoảng cách tâm dọc cố định của toàn ảnh."""
     rows = []
+    region_heights = [
+        max(region["box"][3] - region["box"][1], 1)
+        for region in text_regions
+    ]
+    median_height = float(np.median(region_heights)) if region_heights else 1
+    row_tolerance = max(median_height * 0.65, 6)
 
     for region in sorted(text_regions, key=lambda item: item["center"][1]):
-        region_y_min = region["box"][1]
-        region_y_max = region["box"][3]
-        region_height = max(region_y_max - region_y_min, 1)
         matching_row = None
         matching_distance = None
 
         for row in rows:
-            overlap = max(
-                0,
-                min(region_y_max, row["y_max"])
-                - max(region_y_min, row["y_min"]),
-            )
-            row_height = max(row["y_max"] - row["y_min"], 1)
-            overlap_ratio = overlap / min(region_height, row_height)
             center_distance = abs(region["center"][1] - row["center_y"])
-            allowed_distance = max(region_height, row_height) * 0.55
-
-            if overlap_ratio < 0.35 and center_distance > allowed_distance:
+            if center_distance > row_tolerance:
                 continue
             if matching_distance is None or center_distance < matching_distance:
                 matching_row = row
@@ -110,19 +104,20 @@ def group_text_rows(text_regions):
             rows.append(
                 {
                     "regions": [region],
-                    "y_min": region_y_min,
-                    "y_max": region_y_max,
                     "center_y": region["center"][1],
                 }
             )
             continue
 
         matching_row["regions"].append(region)
-        matching_row["y_min"] = min(matching_row["y_min"], region_y_min)
-        matching_row["y_max"] = max(matching_row["y_max"], region_y_max)
-        matching_row["center_y"] = sum(
-            item["center"][1] for item in matching_row["regions"]
-        ) / len(matching_row["regions"])
+        matching_row["center_y"] = float(
+            np.median(
+                [
+                    item["center"][1]
+                    for item in matching_row["regions"]
+                ]
+            )
+        )
 
     rows.sort(key=lambda row: row["center_y"])
     for row in rows:
@@ -263,10 +258,12 @@ class Page3PlusKeyValueExtractor:
     def _recognize_text(self, image):
         """Nhận diện nội dung và bbox của toàn bộ text trên ảnh."""
         text_regions = []
+        pending_regions = []
+        text_crops = []
         image_height, image_width = image.shape[:2]
         detection_results = self.text_detector.predict(
             input=image,
-            limit_side_len=4200,
+            limit_side_len=3200,
             limit_type="max",
             thresh=0.3,
             box_thresh=0.6,
@@ -276,31 +273,46 @@ class Page3PlusKeyValueExtractor:
         for detection_result in detection_results:
             for polygon in detection_result["dt_polys"]:
                 polygon = np.array(polygon, dtype=np.float32)
-                x_min, y_min = polygon.min(axis=0).astype(int)
-                x_max, y_max = polygon.max(axis=0).astype(int)
+                x_min, y_min = map(int, polygon.min(axis=0))
+                x_max, y_max = map(int, polygon.max(axis=0))
                 x_min = max(x_min, 0)
                 y_min = max(y_min, 0)
                 x_max = min(x_max, image_width)
                 y_max = min(y_max, image_height)
                 text_crop = image[y_min:y_max, x_min:x_max]
-                recognition_result = self.text_recognizer.predict(
-                    input=text_crop,
-                    batch_size=1,
-                )[0]
-                text = recognition_result["rec_text"].strip()
-                if not text:
-                    continue
-                text_regions.append(
+                text_crops.append(text_crop)
+                pending_regions.append(
                     {
                         "box": [x_min, y_min, x_max, y_max],
                         "center": [
                             float(polygon[:, 0].mean()),
                             float(polygon[:, 1].mean()),
                         ],
-                        "text": text,
-                        "score": float(recognition_result["rec_score"]),
                     }
                 )
+
+        if not text_crops:
+            return text_regions
+
+        recognition_results = self.text_recognizer.predict(
+            input=text_crops,
+            batch_size=8,
+        )
+        for pending_region, recognition_result in zip(
+            pending_regions,
+            recognition_results,
+            strict=True,
+        ):
+            text = recognition_result["rec_text"].strip()
+            if not text:
+                continue
+            text_regions.append(
+                {
+                    **pending_region,
+                    "text": text,
+                    "score": float(recognition_result["rec_score"]),
+                }
+            )
 
         return text_regions
 
@@ -449,6 +461,12 @@ class Page3PlusKeyValueExtractor:
         """Trả danh sách cặp key-value và ảnh đánh dấu kết quả."""
         image_width = image.shape[1]
         text_regions = self._recognize_text(image)
+        text_regions.sort(
+            key=lambda region: (
+                region["center"][1],
+                region["center"][0],
+            )
+        )
         rows = group_text_rows(text_regions)
         region_heights = [
             region["box"][3] - region["box"][1]
@@ -533,6 +551,26 @@ class Page3PlusKeyValueExtractor:
                     current_group = group
 
         visualization = image.copy()
+        for index, region in enumerate(text_regions, start=1):
+            x_min, y_min, x_max, y_max = region["box"]
+            cv2.rectangle(
+                visualization,
+                (x_min, y_min),
+                (x_max, y_max),
+                (145, 145, 145),
+                1,
+            )
+            cv2.putText(
+                visualization,
+                f"O{index}:{region['score']:.2f}",
+                (x_min, max(y_min - 5, 15)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (100, 100, 100),
+                1,
+                cv2.LINE_AA,
+            )
+
         for index, record in enumerate(records, start=1):
             key_x1, key_y1, key_x2, key_y2 = record["key_bbox"]
             value_x1, value_y1, value_x2, value_y2 = record["value_bbox"]
@@ -570,7 +608,7 @@ class Page3PlusKeyValueExtractor:
 
         for record in records:
             record.pop("center_y")
-        return records, visualization, len(text_regions)
+        return records, visualization, text_regions
 
 
 def parse_arguments():
@@ -607,11 +645,17 @@ def build_html(sections, total_items):
         .key {{ color: #16833f; }}
         .value {{ color: #006a9f; }}
         .metadata {{ color: #555; }}
+        details {{ margin-top: 16px; }}
+        .legend {{ color: #555; }}
     </style>
 </head>
 <body>
     <h1>Phân tích key-value page 3+</h1>
     <p>Tổng số cặp: {total_items}</p>
+    <p class="legend">
+        Xám: vùng OCR gốc | Xanh lá: key | Xanh dương: value |
+        Cam: liên kết key-value
+    </p>
     {''.join(sections)}
 </body>
 </html>
@@ -649,7 +693,7 @@ def main():
         if image is None:
             raise FileNotFoundError(f"Không đọc được ảnh: {image_path}")
 
-        records, visualization, ocr_count = extractor.extract(image)
+        records, visualization, text_regions = extractor.extract(image)
         source_name = image_path.parent.name
         output_stem = f"{source_name}_{image_path.stem}"
         visualization_path = output_directory / f"{output_stem}_key_value.png"
@@ -673,11 +717,25 @@ def main():
                 "</tr>"
             )
 
+        ocr_rows = []
+        for region_index, region in enumerate(text_regions, start=1):
+            bbox = json.dumps(region["box"])
+            ocr_rows.append(
+                "<tr>"
+                f"<td>O{region_index}</td>"
+                f"<td>{escape(region['text'])}</td>"
+                f"<td>{region['score']:.4f}</td>"
+                f"<td>{escape(bbox)}</td>"
+                "</tr>"
+            )
+
         sections.append(
             f"""
 <section>
     <h2>{escape(source_name)} / {escape(image_path.name)}</h2>
-    <p class="metadata">OCR regions: {ocr_count} | Cặp key-value: {len(records)}</p>
+    <p class="metadata">
+        OCR regions: {len(text_regions)} | Cặp key-value: {len(records)}
+    </p>
     <img src="{escape(visualization_path.name)}" alt="Kết quả {escape(output_stem)}">
     <table>
         <thead>
@@ -688,6 +746,15 @@ def main():
         </thead>
         <tbody>{''.join(table_rows)}</tbody>
     </table>
+    <details>
+        <summary>Toàn bộ vùng OCR ({len(text_regions)})</summary>
+        <table>
+            <thead>
+                <tr><th>#</th><th>OCR text</th><th>Score</th><th>Bbox</th></tr>
+            </thead>
+            <tbody>{''.join(ocr_rows)}</tbody>
+        </table>
+    </details>
 </section>
 """
         )
