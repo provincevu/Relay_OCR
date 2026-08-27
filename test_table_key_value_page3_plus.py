@@ -240,20 +240,20 @@ class Page3PlusKeyValueExtractor:
     """Trích xuất cặp key-value trực tiếp từ các vùng OCR."""
 
     def __init__(self):
-        """Khởi tạo detector và recognizer PP-OCRv6 medium."""
+        """Khởi tạo detector small và recognizer PP-OCRv6 medium."""
         self.text_detector = TextDetection(
-            model_name="PP-OCRv6_medium_det",
+            model_name="PP-OCRv6_small_det",
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,
-            cpu_threads=6,
+            cpu_threads=4,
         )
         self.text_recognizer = TextRecognition(
-            model_name="PP-OCRv6_medium_rec",
+            model_name="PP-OCRv6_small_rec",
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,
-            cpu_threads=6,
+            cpu_threads=4,
         )
 
     def _recognize_text(self, image):
@@ -266,7 +266,7 @@ class Page3PlusKeyValueExtractor:
         detection_started = perf_counter()
         detection_results = self.text_detector.predict(
             input=image,
-            limit_side_len=3200,
+            limit_side_len=1600,
             limit_type="max",
             thresh=0.3,
             box_thresh=0.6,
@@ -302,13 +302,28 @@ class Page3PlusKeyValueExtractor:
             return text_regions, timings
 
         recognition_started = perf_counter()
-        recognition_results = self.text_recognizer.predict(
-            input=text_crops,
+        indexed_crops = list(enumerate(text_crops))
+        indexed_crops.sort(
+            key=lambda item: item[1].shape[1] / item[1].shape[0],
+        )
+        sorted_crops = [crop for _, crop in indexed_crops]
+        sorted_recognition_results = self.text_recognizer.predict(
+            input=sorted_crops,
             batch_size=8,
         )
-        for pending_region, recognition_result in zip(
+        indexed_recognition_results = [
+            (original_index, recognition_result)
+            for (original_index, _), recognition_result in zip(
+                indexed_crops,
+                sorted_recognition_results,
+                strict=True,
+            )
+        ]
+        indexed_recognition_results.sort(key=lambda item: item[0])
+
+        for pending_region, (_, recognition_result) in zip(
             pending_regions,
-            recognition_results,
+            indexed_recognition_results,
             strict=True,
         ):
             text = recognition_result["rec_text"].strip()
