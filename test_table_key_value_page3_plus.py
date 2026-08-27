@@ -816,7 +816,8 @@ def main():
         total_items += len(records)
         timings["Chuẩn bị HTML"] = perf_counter() - html_section_started
         total_seconds = perf_counter() - image_started
-        print_image_timings(image_path, timings, total_seconds)
+        if not arguments.all_page_001:
+            print_image_timings(image_path, timings, total_seconds)
 
     html_path = output_directory / "key_value_analysis.html"
     html_write_started = perf_counter()
