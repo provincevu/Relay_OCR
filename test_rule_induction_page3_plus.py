@@ -1,10 +1,10 @@
 # Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên một page.
-# Chức năng: OCR ảnh, tạo HTML cho phép chọn mẫu và xem preview tức thời.
-# Luồng xử lý: ảnh → OCR regions → HTML tương tác → chọn mẫu → suy luận rule.
+# Chức năng: OCR ảnh, chọn mẫu hai cột hoặc inline và xem preview tức thời.
+# Luồng xử lý: ảnh → OCR regions → chọn mẫu → tách/gộp bbox → suy luận rule.
 # Cấu hình/parameter: nhận một đường dẫn ảnh page 3+.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
 # Input/output: đọc một ảnh; ghi ảnh nguồn và rule_induction.html.
-# Contract: rule chỉ áp dụng từ mẫu đầu tiên trở xuống trong đúng page.
+# Contract: rule và inline assignment chỉ áp dụng trong đúng page hiện tại.
 
 import argparse
 import json
@@ -163,6 +163,10 @@ def build_html(image_name, image_width, image_height, regions):
             background: rgba(124, 58, 237, 0.16);
             border-color: var(--tim);
         }
+        .swatch.inline {
+            background: rgba(234, 88, 12, 0.18);
+            border-color: var(--cam);
+        }
         .image-stage {
             background: #e5e7eb;
             border: 1px solid #94a3b8;
@@ -214,6 +218,11 @@ def build_html(image_name, image_width, image_height, regions):
             border-color: var(--xanh-duong);
             border-width: 3px;
         }
+        .ocr-box.manual-inline {
+            background: rgba(234, 88, 12, 0.22);
+            border-color: var(--cam);
+            border-width: 4px;
+        }
         .ocr-box.predicted-key {
             background: rgba(124, 58, 237, 0.17);
             border-color: var(--tim);
@@ -222,6 +231,11 @@ def build_html(image_name, image_width, image_height, regions):
         .ocr-box.predicted-value {
             background: rgba(192, 38, 211, 0.17);
             border-color: var(--hong);
+            border-style: dashed;
+        }
+        .ocr-box.predicted-inline {
+            background: rgba(217, 119, 6, 0.17);
+            border-color: #d97706;
             border-style: dashed;
         }
         .logical-box {
@@ -310,6 +324,37 @@ def build_html(image_name, image_width, image_height, regions):
         th { background: #e2e8f0; }
         .source-manual { color: var(--xanh-la); font-weight: 700; }
         .source-rule { color: var(--tim); font-weight: 700; }
+        dialog {
+            border: 0;
+            border-radius: 14px;
+            box-shadow: 0 24px 70px rgba(15, 23, 42, 0.30);
+            max-width: 620px;
+            padding: 22px;
+            width: calc(100% - 32px);
+        }
+        dialog::backdrop { background: rgba(15, 23, 42, 0.60); }
+        dialog h2 { margin: 0 0 8px; }
+        dialog p { color: #475569; line-height: 1.5; }
+        .inline-original {
+            background: #f1f5f9;
+            border-radius: 8px;
+            line-height: 1.5;
+            padding: 10px;
+        }
+        .inline-form { display: grid; gap: 12px; }
+        .inline-form label { display: grid; font-weight: 700; gap: 6px; }
+        .inline-form input {
+            border: 1px solid #94a3b8;
+            border-radius: 7px;
+            font: inherit;
+            padding: 9px 10px;
+        }
+        .inline-error { color: #b91c1c; font-weight: 700; min-height: 20px; }
+        .inline-dialog-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+        }
         @media (max-width: 1100px) {
             .workspace { grid-template-columns: 1fr; }
             .side-panel { position: static; }
@@ -343,6 +388,9 @@ def build_html(image_name, image_width, image_height, regions):
             <button class="secondary" id="cancelKey" disabled>
                 Hủy key đang chọn
             </button>
+            <button class="secondary" id="inlineCurrentKey" disabled>
+                Key-value cùng bbox
+            </button>
             <button class="secondary" id="undoExample" disabled>
                 Xóa mẫu gần nhất
             </button>
@@ -357,6 +405,38 @@ def build_html(image_name, image_width, image_height, regions):
             </button>
         </div>
     </section>
+
+    <dialog id="inlineDialog">
+        <h2>Tách key-value trong cùng bbox</h2>
+        <p>
+            Chương trình đã thử tách bằng ký tự đặc biệt. Bạn có thể sửa
+            separator, key hoặc value trước khi xác nhận.
+        </p>
+        <p class="inline-original" id="inlineOriginal"></p>
+        <div class="inline-form">
+            <label>
+                Ký tự phân tách
+                <input id="inlineSeparator" autocomplete="off">
+            </label>
+            <label>
+                Key
+                <input id="inlineKey" autocomplete="off">
+            </label>
+            <label>
+                Value
+                <input id="inlineValue" autocomplete="off">
+            </label>
+            <div class="inline-error" id="inlineError" role="alert"></div>
+            <div class="inline-dialog-actions">
+                <button class="secondary" id="cancelInline" type="button">
+                    Hủy
+                </button>
+                <button class="confirm" id="confirmInline" type="button">
+                    Xác nhận tách
+                </button>
+            </div>
+        </div>
+    </dialog>
 
     <section class="workspace">
         <div class="card">
@@ -374,6 +454,9 @@ def build_html(image_name, image_width, image_height, regions):
                     </span>
                     <span class="legend-item">
                         <span class="swatch predicted"></span>Preview suy luận
+                    </span>
+                    <span class="legend-item">
+                        <span class="swatch inline"></span>Inline key=value
                     </span>
                 </div>
             </div>
@@ -437,6 +520,8 @@ def build_html(image_name, image_width, image_height, regions):
         examples: [],
         predictions: [],
         rule: null,
+        inlineRule: null,
+        inlineRegionId: null,
         confirmed: false,
         headerProbe: null,
         autoHeaders: [],
@@ -451,11 +536,21 @@ def build_html(image_name, image_width, image_height, regions):
     const instruction = document.getElementById("instruction");
     const hoverInfo = document.getElementById("hoverInfo");
     const cancelKeyButton = document.getElementById("cancelKey");
+    const inlineCurrentKeyButton = document.getElementById("inlineCurrentKey");
     const undoExampleButton = document.getElementById("undoExample");
     const undoSuppressionButton = document.getElementById("undoSuppression");
     const resetAllButton = document.getElementById("resetAll");
     const confirmResultButton = document.getElementById("confirmResult");
     const resultSection = document.getElementById("resultSection");
+    const inlineDialog = document.getElementById("inlineDialog");
+    const inlineOriginal = document.getElementById("inlineOriginal");
+    const inlineSeparator = document.getElementById("inlineSeparator");
+    const inlineKey = document.getElementById("inlineKey");
+    const inlineValue = document.getElementById("inlineValue");
+    const inlineError = document.getElementById("inlineError");
+    const cancelInlineButton = document.getElementById("cancelInline");
+    const confirmInlineButton = document.getElementById("confirmInline");
+    const automaticInlineSeparators = ["=>", "→", "=", ":"];
 
     function centerX(region) {
         return (region.box[0] + region.box[2]) / 2;
@@ -689,18 +784,112 @@ def build_html(image_name, image_width, image_height, regions):
                 );
                 if (cost < bestCost) {
                     bestCost = cost;
-                    bestExample = {key, value};
+                    bestExample = {key, value, mode: "spatial"};
                 }
             }
         }
         return bestExample;
     }
 
-    function inferRule() {
-        if (state.examples.length === 0) {
+    function virtualInlineBlock(region, text, role) {
+        return {
+            id: `${region.id}:${role}`,
+            regionIds: [region.id],
+            text,
+            box: [...region.box],
+            score: region.score,
+        };
+    }
+
+    function splitInlineText(text, separators) {
+        for (const separator of separators) {
+            if (!separator) {
+                continue;
+            }
+            const separatorIndex = text.indexOf(separator);
+            if (separatorIndex <= 0) {
+                continue;
+            }
+            const key = text.slice(0, separatorIndex).trim();
+            const value = text.slice(
+                separatorIndex + separator.length,
+            ).trim();
+            if (key && value) {
+                return {key, value, separator};
+            }
+        }
+        return null;
+    }
+
+    function buildInlineExample(regionId, keyText, valueText, separator) {
+        const region = regionById.get(regionId);
+        return {
+            key: virtualInlineBlock(region, keyText, "key"),
+            value: virtualInlineBlock(region, valueText, "value"),
+            mode: "inline",
+            separator,
+        };
+    }
+
+    function inferInlineRule() {
+        const inlineExamples = state.examples.filter(example => (
+            example.mode === "inline"
+        ));
+        if (inlineExamples.length === 0) {
             return null;
         }
-        const features = state.examples.map(example => pairFeatures(
+        return {
+            separators: [...new Set(inlineExamples
+                .map(example => example.separator)
+                .filter(separator => separator))],
+            startY: pairY(inlineExamples[0]),
+            sampleCount: inlineExamples.length,
+        };
+    }
+
+    function predictInlinePairs(rule, occupiedRegionIds) {
+        if (!rule || rule.separators.length === 0) {
+            return [];
+        }
+        const manualRegionIds = new Set(state.examples.flatMap(example => (
+            [...example.key.regionIds, ...example.value.regionIds]
+        )));
+        const predictions = [];
+        for (const region of regions) {
+            if (
+                manualRegionIds.has(region.id)
+                || occupiedRegionIds.has(region.id)
+                || centerY(region) < rule.startY
+            ) {
+                continue;
+            }
+            const split = splitInlineText(region.text, rule.separators);
+            if (!split) {
+                continue;
+            }
+            const pair = {
+                key: virtualInlineBlock(region, split.key, "key"),
+                value: virtualInlineBlock(region, split.value, "value"),
+                mode: "inline",
+                separator: split.separator,
+                score: region.score,
+            };
+            if (!state.suppressedPairIds.has(pairInstanceId(pair))) {
+                predictions.push(pair);
+                occupiedRegionIds.add(region.id);
+            }
+        }
+        return predictions;
+    }
+
+    function inferRule() {
+        const spatialExamples = state.examples.filter(example => (
+            example.mode !== "inline"
+        ));
+        if (spatialExamples.length === 0) {
+            return null;
+        }
+        const features = spatialExamples.map(example => pairFeatures(
             example.key,
             example.value,
         ));
@@ -710,7 +899,7 @@ def build_html(image_name, image_width, image_height, regions):
         const keyX = median(keyXs);
         const valueX = median(valueXs);
         const deltaX = median(deltaXs);
-        const firstExample = state.examples[0];
+        const firstExample = spatialExamples[0];
         const startY = (
             centerY(firstExample.key) + centerY(firstExample.value)
         ) / 2;
@@ -997,16 +1186,24 @@ def build_html(image_name, image_width, image_height, regions):
     function renderLogicalBlocks() {
         logicalLayer.replaceChildren();
         for (const example of state.examples) {
-            appendLogicalBox(example.key, "manual-key", "KEY gộp");
-            appendLogicalBox(example.value, "manual-value", "VALUE gộp");
+            if (example.mode === "inline") {
+                continue;
+            } else {
+                appendLogicalBox(example.key, "manual-key", "KEY gộp");
+                appendLogicalBox(example.value, "manual-value", "VALUE gộp");
+            }
         }
         for (const prediction of state.predictions) {
-            appendLogicalBox(prediction.key, "predicted-key", "key? gộp");
-            appendLogicalBox(
-                prediction.value,
-                "predicted-value",
-                "value? gộp",
-            );
+            if (prediction.mode === "inline") {
+                continue;
+            } else {
+                appendLogicalBox(prediction.key, "predicted-key", "key? gộp");
+                appendLogicalBox(
+                    prediction.value,
+                    "predicted-value",
+                    "value? gộp",
+                );
+            }
         }
     }
 
@@ -1023,6 +1220,12 @@ def build_html(image_name, image_width, image_height, regions):
         const predictedValues = new Set(state.predictions.flatMap(pair => (
             pair.value.regionIds
         )));
+        const manualInline = new Set(state.examples
+            .filter(example => example.mode === "inline")
+            .flatMap(example => example.key.regionIds));
+        const predictedInline = new Set(state.predictions
+            .filter(pair => pair.mode === "inline")
+            .flatMap(pair => pair.key.regionIds));
 
         for (const box of boxLayer.querySelectorAll(".ocr-box")) {
             const regionId = box.dataset.regionId;
@@ -1031,6 +1234,8 @@ def build_html(image_name, image_width, image_height, regions):
             box.classList.toggle("manual-value", manualValues.has(regionId));
             box.classList.toggle("predicted-key", predictedKeys.has(regionId));
             box.classList.toggle("predicted-value", predictedValues.has(regionId));
+            box.classList.toggle("manual-inline", manualInline.has(regionId));
+            box.classList.toggle("predicted-inline", predictedInline.has(regionId));
             box.disabled = state.confirmed;
         }
     }
@@ -1054,10 +1259,14 @@ def build_html(image_name, image_width, image_height, regions):
     function renderLinks() {
         linkLayer.replaceChildren();
         for (const example of state.examples) {
-            svgLine(example, "manual-link", "#ea580c", "");
+            if (example.mode !== "inline") {
+                svgLine(example, "manual-link", "#ea580c", "");
+            }
         }
         for (const prediction of state.predictions) {
-            svgLine(prediction, "predicted-link", "#7c3aed", "16 12");
+            if (prediction.mode !== "inline") {
+                svgLine(prediction, "predicted-link", "#7c3aed", "16 12");
+            }
         }
     }
 
@@ -1073,6 +1282,12 @@ def build_html(image_name, image_width, image_height, regions):
         const value = document.createElement("strong");
         value.textContent = pair.value.text;
         item.append(key, arrow, value);
+        if (pair.mode === "inline") {
+            const status = document.createElement("div");
+            status.className = "pair-status";
+            status.textContent = "Inline assignment trong cùng bbox.";
+            item.appendChild(status);
+        }
         if (includeScore) {
             const score = document.createElement("div");
             score.textContent = `Độ tin cậy: ${(pair.score * 100).toFixed(1)}%`;
@@ -1152,18 +1367,28 @@ def build_html(image_name, image_width, image_height, regions):
 
     function renderRuleSummary() {
         const target = document.getElementById("ruleSummary");
-        if (!state.rule) {
+        if (!state.rule && !state.inlineRule) {
             target.textContent = "Chưa có rule. Số mẫu không bị giới hạn.";
             return;
         }
+        const descriptions = [];
+        if (state.rule) {
+            descriptions.push(
+                `Rule hai cột từ ${state.rule.sampleCount} mẫu, có một probe `
+                + "phía trên không đưa vào kết quả",
+            );
+        }
+        if (state.inlineRule) {
+            const separators = state.inlineRule.separators.length > 0
+                ? state.inlineRule.separators.join(", ")
+                : "chưa có separator";
+            descriptions.push(
+                `Inline rule từ ${state.inlineRule.sampleCount} mẫu, `
+                + `separator: ${separators}`,
+            );
+        }
         target.textContent = (
-            `Rule từ ${state.rule.sampleCount} mẫu: key quanh `
-            + `${(state.rule.keyX * 100).toFixed(1)}% `
-            + `chiều rộng page; value quanh ${(state.rule.valueX * 100).toFixed(1)}%; `
-            + `value nằm ${state.rule.direction > 0 ? "bên phải" : "bên trái"} key; `
-            + "dùng một probe phía trên nhưng chỉ xuất kết quả từ mẫu đầu tiên "
-            + "trở xuống; "
-            + `preview ${state.predictions.length} cặp.`
+            `${descriptions.join("; ")}; preview ${state.predictions.length} cặp.`
         );
     }
 
@@ -1195,6 +1420,7 @@ def build_html(image_name, image_width, image_height, regions):
 
     function updateButtons() {
         cancelKeyButton.disabled = !state.currentKeyId || state.confirmed;
+        inlineCurrentKeyButton.disabled = !state.currentKeyId || state.confirmed;
         undoExampleButton.disabled = state.examples.length === 0 || state.confirmed;
         undoSuppressionButton.disabled = (
             state.suppressionHistory.length === 0 || state.confirmed
@@ -1207,6 +1433,7 @@ def build_html(image_name, image_width, image_height, regions):
 
     function recomputePreview() {
         state.rule = inferRule();
+        state.inlineRule = inferInlineRule();
         if (state.rule) {
             classifyPredictions(state.rule);
         } else {
@@ -1215,6 +1442,21 @@ def build_html(image_name, image_width, image_height, regions):
             state.autoHeaders = [];
             state.suspectedHeaderIds = new Set();
         }
+        const occupiedRegionIds = new Set(state.examples.flatMap(example => (
+            [...example.key.regionIds, ...example.value.regionIds]
+        )));
+        for (const pair of state.predictions) {
+            for (const regionId of [
+                ...pair.key.regionIds,
+                ...pair.value.regionIds,
+            ]) {
+                occupiedRegionIds.add(regionId);
+            }
+        }
+        state.predictions.push(
+            ...predictInlinePairs(state.inlineRule, occupiedRegionIds),
+        );
+        state.predictions.sort((left, right) => pairY(left) - pairY(right));
         refreshBoxStyles();
         renderLogicalBlocks();
         renderLinks();
@@ -1250,6 +1492,76 @@ def build_html(image_name, image_width, image_height, regions):
         instruction.textContent = "Đã khôi phục cặp bị loại gần nhất.";
     }
 
+    function openInlineEditor(regionId) {
+        const region = regionById.get(regionId);
+        const split = splitInlineText(
+            region.text,
+            automaticInlineSeparators,
+        );
+        state.inlineRegionId = regionId;
+        inlineOriginal.textContent = `OCR gốc: “${region.text}”`;
+        inlineSeparator.value = split ? split.separator : "";
+        inlineKey.value = split ? split.key : region.text;
+        inlineValue.value = split ? split.value : "";
+        inlineError.textContent = split
+            ? `Đã tự tách bằng “${split.separator}”.`
+            : "Không tìm thấy separator tự động. Hãy tự nhập key và value.";
+        inlineDialog.showModal();
+        inlineKey.focus();
+    }
+
+    function updateInlineFieldsFromSeparator() {
+        const region = regionById.get(state.inlineRegionId);
+        const split = splitInlineText(
+            region.text,
+            [inlineSeparator.value],
+        );
+        if (!split) {
+            inlineError.textContent = (
+                "Không tách được OCR gốc bằng separator này. "
+                + "Bạn vẫn có thể tự nhập key và value."
+            );
+            return;
+        }
+        inlineKey.value = split.key;
+        inlineValue.value = split.value;
+        inlineError.textContent = `Đã tách lại bằng “${split.separator}”.`;
+    }
+
+    function confirmInlineSelection() {
+        const keyText = inlineKey.value.trim();
+        const valueText = inlineValue.value.trim();
+        if (!keyText || !valueText) {
+            inlineError.textContent = "Key và value đều phải có nội dung.";
+            return;
+        }
+        const example = buildInlineExample(
+            state.inlineRegionId,
+            keyText,
+            valueText,
+            inlineSeparator.value.trim(),
+        );
+        state.examples.push(example);
+        state.currentKeyId = null;
+        state.inlineRegionId = null;
+        inlineDialog.close();
+        recomputePreview();
+        instruction.className = "instruction";
+        instruction.textContent = (
+            `Đã thêm inline assignment “${keyText}” → “${valueText}”. `
+            + "Nếu separator được cung cấp, các bbox tương tự đã được suy luận."
+        );
+    }
+
+    function cancelInlineSelection() {
+        state.inlineRegionId = null;
+        inlineDialog.close();
+        instruction.textContent = (
+            "Đã hủy tách inline. Hãy chọn một bbox value khác hoặc bấm lại "
+            + "bbox key để thử lại."
+        );
+    }
+
     function selectRegion(regionId) {
         if (state.confirmed) {
             return;
@@ -1272,7 +1584,8 @@ def build_html(image_name, image_width, image_height, regions):
             instruction.className = "instruction wait-value";
             instruction.textContent = (
                 `Đã chọn key: “${region.text}”. `
-                + "Bước tiếp theo: hãy bấm vào bbox chứa value tương ứng."
+                + "Hãy bấm bbox chứa value; nếu key-value cùng bbox, "
+                + "hãy bấm lại bbox hoặc chọn “Key-value cùng bbox”."
             );
             refreshBoxStyles();
             updateSteps();
@@ -1280,11 +1593,7 @@ def build_html(image_name, image_width, image_height, regions):
             return;
         }
         if (state.currentKeyId === regionId) {
-            instruction.textContent = (
-                "Key và value đang là cùng một bbox. Phiên bản này yêu cầu "
-                + "hai bbox khác nhau; "
-                + "hãy bấm một bbox value khác hoặc hủy key đang chọn."
-            );
+            openInlineEditor(regionId);
             return;
         }
         if (regionWasUsed) {
@@ -1340,6 +1649,8 @@ def build_html(image_name, image_width, image_height, regions):
         state.examples = [];
         state.predictions = [];
         state.rule = null;
+        state.inlineRule = null;
+        state.inlineRegionId = null;
         state.confirmed = false;
         state.headerProbe = null;
         state.autoHeaders = [];
@@ -1411,10 +1722,20 @@ def build_html(image_name, image_width, image_height, regions):
     }
 
     cancelKeyButton.addEventListener("click", cancelCurrentKey);
+    inlineCurrentKeyButton.addEventListener("click", () => {
+        openInlineEditor(state.currentKeyId);
+    });
     undoExampleButton.addEventListener("click", undoLastExample);
     undoSuppressionButton.addEventListener("click", undoLastSuppression);
     resetAllButton.addEventListener("click", resetAll);
     confirmResultButton.addEventListener("click", confirmResults);
+    inlineSeparator.addEventListener("change", updateInlineFieldsFromSeparator);
+    cancelInlineButton.addEventListener("click", cancelInlineSelection);
+    confirmInlineButton.addEventListener("click", confirmInlineSelection);
+    inlineDialog.addEventListener("cancel", event => {
+        event.preventDefault();
+        cancelInlineSelection();
+    });
 
     renderBoxes();
     renderLinks();
