@@ -350,6 +350,7 @@ class Page3PlusKeyValueExtractor:
         for region in row["regions"]:
             if "=" not in region["text"]:
                 continue
+            matched = False
             for match in ASSIGNMENT_PATTERN.finditer(region["text"]):
                 key = match.group("key").strip()
                 value = clean_assignment_value(match.group("value"))
@@ -382,6 +383,11 @@ class Page3PlusKeyValueExtractor:
                         "center_y": row["center_y"],
                     }
                 )
+                matched = True
+            if matched:
+                region["status"] = ""
+            else:
+                region["status"] = "Biểu thức có dấu bằng không hợp lệ"
 
         group_candidates = [
             region
@@ -402,6 +408,22 @@ class Page3PlusKeyValueExtractor:
                 for record in records:
                     record["metadata"]["group"] = group
                 current_group = group
+                for region in group_candidates:
+                    region["status"] = "Tên nhóm"
+            else:
+                for region in group_candidates:
+                    region["status"] = "Tiêu đề tài liệu"
+
+        if records:
+            for region in non_assignment_regions:
+                if region["status"] is not None:
+                    continue
+                if region["text"].lstrip().startswith("("):
+                    region["status"] = "Chú thích"
+                elif is_document_header(region["text"]):
+                    region["status"] = "Tiêu đề tài liệu"
+                else:
+                    region["status"] = "Không phù hợp quy tắc nào"
 
         return records, current_group
 
@@ -411,18 +433,39 @@ class Page3PlusKeyValueExtractor:
         key_regions = columns.get("key", [])
         value_regions = columns.get("value", [])
         if not key_regions or not value_regions:
+            status = (
+                "Không tìm thấy khóa theo cấu trúc cột"
+                if not key_regions
+                else "Không tìm thấy giá trị theo cấu trúc cột"
+            )
+            for region in row["regions"]:
+                region["status"] = status
             return None
 
         key = join_regions(key_regions)
         value = join_regions(value_regions)
         if is_document_header(key) or not key or not value:
+            status = (
+                "Tiêu đề tài liệu"
+                if is_document_header(key)
+                else "Không phù hợp quy tắc nào"
+            )
+            for region in row["regions"]:
+                region["status"] = status
             return None
+
+        for region in key_regions:
+            region["status"] = ""
+        for region in value_regions:
+            region["status"] = ""
 
         metadata = {}
         for role in ("code", "index", "description", "unit"):
             role_regions = columns.get(role, [])
             if role_regions:
                 metadata[role] = join_regions(role_regions)
+                for region in role_regions:
+                    region["status"] = "Thông tin bổ sung"
         if current_group:
             metadata["group"] = current_group
 
@@ -440,6 +483,13 @@ class Page3PlusKeyValueExtractor:
         """Ghép Item và value theo khoảng trống ngang lớn nhất trên hàng."""
         regions = row["regions"]
         if len(regions) < 2:
+            region = regions[0]
+            if region["text"].lstrip().startswith("("):
+                region["status"] = "Chú thích"
+            elif is_document_header(region["text"]):
+                region["status"] = "Tiêu đề tài liệu"
+            else:
+                region["status"] = "Hàng chỉ có một vùng"
             return None
 
         gaps = [
@@ -448,11 +498,15 @@ class Page3PlusKeyValueExtractor:
         ]
         split_index = int(np.argmax(gaps))
         if gaps[split_index] < max(40, median_height * 1.5):
+            for region in regions:
+                region["status"] = "Khoảng trống không đủ lớn"
             return None
 
         key_regions = regions[: split_index + 1]
         value_regions = regions[split_index + 1 :]
         if value_regions[0]["center"][0] < image_width * 0.52:
+            for region in regions:
+                region["status"] = "Giá trị nằm trước ngưỡng 52%"
             return None
 
         code, key, key_box = split_leading_code(key_regions)
@@ -463,7 +517,26 @@ class Page3PlusKeyValueExtractor:
             or key.lstrip().startswith("(")
             or is_document_header(key)
         ):
+            if key.lstrip().startswith("("):
+                status = "Chú thích"
+            elif is_document_header(key):
+                status = "Tiêu đề tài liệu"
+            else:
+                status = "Không phù hợp quy tắc nào"
+            for region in regions:
+                region["status"] = status
             return None
+
+        for region in key_regions:
+            region["status"] = ""
+        for region in value_regions:
+            region["status"] = ""
+        if (
+            code
+            and len(key_regions) > 1
+            and key_regions[0]["text"].strip() == code
+        ):
+            key_regions[0]["status"] = "Thông tin bổ sung"
 
         metadata = {}
         if code:
@@ -492,6 +565,8 @@ class Page3PlusKeyValueExtractor:
                 region["center"][0],
             )
         )
+        for region in text_regions:
+            region["status"] = None
         rows = group_text_rows(text_regions)
         region_heights = [
             region["box"][3] - region["box"][1]
@@ -508,6 +583,8 @@ class Page3PlusKeyValueExtractor:
             if schema is not None:
                 active_schema = schema
                 last_column_record = None
+                for region in row["regions"]:
+                    region["status"] = "Tiêu đề cột"
                 continue
 
             assignment_records, current_group = self._extract_assignments(
@@ -564,6 +641,8 @@ class Page3PlusKeyValueExtractor:
                     ]
                 )
                 last_column_record["center_y"] = row["center_y"]
+                for region in right_regions:
+                    region["status"] = ""
                 continue
 
             if left_regions and not right_regions:
@@ -574,6 +653,18 @@ class Page3PlusKeyValueExtractor:
                     and not is_document_header(group)
                 ):
                     current_group = group
+                    for region in left_regions:
+                        region["status"] = "Tên nhóm"
+                elif group.lstrip().startswith("("):
+                    for region in left_regions:
+                        region["status"] = "Chú thích"
+                elif is_document_header(group):
+                    for region in left_regions:
+                        region["status"] = "Tiêu đề tài liệu"
+
+        for region in text_regions:
+            if region["status"] is None:
+                region["status"] = "Không phù hợp quy tắc nào"
 
         timings["Ghép key-value"] = perf_counter() - extraction_started
         visualization_started = perf_counter()
@@ -775,12 +866,14 @@ def main():
         ocr_rows = []
         for region_index, region in enumerate(text_regions, start=1):
             bbox = json.dumps(region["box"])
+            status = region["status"] or ""
             ocr_rows.append(
                 "<tr>"
                 f"<td>O{region_index}</td>"
                 f"<td>{escape(region['text'])}</td>"
                 f"<td>{region['score']:.4f}</td>"
                 f"<td>{escape(bbox)}</td>"
+                f"<td>{escape(status)}</td>"
                 "</tr>"
             )
 
@@ -805,7 +898,10 @@ def main():
         <summary>Toàn bộ vùng OCR ({len(text_regions)})</summary>
         <table>
             <thead>
-                <tr><th>#</th><th>OCR text</th><th>Score</th><th>Bbox</th></tr>
+                <tr>
+                    <th>#</th><th>OCR text</th><th>Score</th>
+                    <th>Bbox</th><th>Trạng thái</th>
+                </tr>
             </thead>
             <tbody>{''.join(ocr_rows)}</tbody>
         </table>
