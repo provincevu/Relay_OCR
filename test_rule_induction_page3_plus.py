@@ -4,7 +4,7 @@
 # Cấu hình/parameter: nhận một đường dẫn ảnh page 3+.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
 # Input/output: đọc một ảnh; ghi ảnh nguồn và rule_induction.html.
-# Contract: rule chỉ tồn tại trong HTML của đúng page và không được lưu lại.
+# Contract: rule chỉ áp dụng từ mẫu đầu tiên trở xuống trong đúng page.
 
 import argparse
 import json
@@ -172,7 +172,7 @@ def build_html(image_name, image_width, image_height, regions):
             width: 100%;
         }
         .image-stage img { display: block; height: auto; width: 100%; }
-        .box-layer, .link-layer {
+        .box-layer, .link-layer, .logical-layer {
             height: 100%;
             left: 0;
             position: absolute;
@@ -181,6 +181,7 @@ def build_html(image_name, image_width, image_height, regions):
         }
         .link-layer { pointer-events: none; z-index: 5; }
         .box-layer { z-index: 10; }
+        .logical-layer { pointer-events: none; z-index: 20; }
         .ocr-box {
             background: rgba(100, 116, 139, 0.10);
             border: 2px solid rgba(71, 85, 105, 0.82);
@@ -194,17 +195,6 @@ def build_html(image_name, image_width, image_height, regions):
             background: rgba(250, 204, 21, 0.22);
             border-color: #ca8a04;
             box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.40);
-        }
-        .box-label {
-            background: rgba(51, 65, 85, 0.92);
-            color: white;
-            font-size: 10px;
-            left: -2px;
-            line-height: 1.2;
-            padding: 2px 4px;
-            position: absolute;
-            top: -17px;
-            white-space: nowrap;
         }
         .ocr-box.ocr-box.current-key {
             animation: pulse 1.1s infinite;
@@ -234,6 +224,35 @@ def build_html(image_name, image_width, image_height, regions):
             border-color: var(--hong);
             border-style: dashed;
         }
+        .logical-box {
+            border: 4px solid;
+            position: absolute;
+        }
+        .logical-box span {
+            color: white;
+            font-size: 12px;
+            font-weight: 700;
+            left: -4px;
+            line-height: 1.2;
+            padding: 3px 6px;
+            position: absolute;
+            top: -22px;
+            white-space: nowrap;
+        }
+        .logical-box.manual-key { border-color: var(--xanh-la); }
+        .logical-box.manual-key span { background: var(--xanh-la); }
+        .logical-box.manual-value { border-color: var(--xanh-duong); }
+        .logical-box.manual-value span { background: var(--xanh-duong); }
+        .logical-box.predicted-key {
+            border-color: var(--tim);
+            border-style: dashed;
+        }
+        .logical-box.predicted-key span { background: var(--tim); }
+        .logical-box.predicted-value {
+            border-color: var(--hong);
+            border-style: dashed;
+        }
+        .logical-box.predicted-value span { background: var(--hong); }
         @keyframes pulse {
             50% { box-shadow: 0 0 0 6px rgba(21, 128, 61, 0.10); }
         }
@@ -306,7 +325,7 @@ def build_html(image_name, image_width, image_height, regions):
             Bước 1: Hãy bấm vào bbox chứa key đầu tiên trên ảnh.
         </div>
         <div class="hover-info" id="hoverInfo">
-            Di chuột lên bbox để xem ID, nội dung OCR và độ tin cậy.
+            Di chuột lên bbox để xem nội dung OCR và độ tin cậy.
         </div>
         <div class="actions">
             <button class="secondary" id="cancelKey" disabled>
@@ -349,6 +368,7 @@ def build_html(image_name, image_width, image_height, regions):
                      viewBox="0 0 __IMAGE_WIDTH__ __IMAGE_HEIGHT__"
                      preserveAspectRatio="none"></svg>
                 <div class="box-layer" id="boxLayer"></div>
+                <div class="logical-layer" id="logicalLayer"></div>
             </div>
         </div>
 
@@ -405,6 +425,7 @@ def build_html(image_name, image_width, image_height, regions):
 
     const boxLayer = document.getElementById("boxLayer");
     const linkLayer = document.getElementById("linkLayer");
+    const logicalLayer = document.getElementById("logicalLayer");
     const instruction = document.getElementById("instruction");
     const hoverInfo = document.getElementById("hoverInfo");
     const cancelKeyButton = document.getElementById("cancelKey");
@@ -467,14 +488,83 @@ def build_html(image_name, image_width, image_height, regions):
         return "văn bản";
     }
 
+    function combineRegions(parts) {
+        const ordered = [...parts].sort((left, right) => (
+            centerY(left) - centerY(right) || centerX(left) - centerX(right)
+        ));
+        const regionIds = ordered.map(region => region.id);
+        return {
+            id: regionIds.join("+"),
+            regionIds,
+            text: ordered.map(region => region.text).join(" "),
+            box: [
+                Math.min(...ordered.map(region => region.box[0])),
+                Math.min(...ordered.map(region => region.box[1])),
+                Math.max(...ordered.map(region => region.box[2])),
+                Math.max(...ordered.map(region => region.box[3])),
+            ],
+            score: ordered.reduce((sum, region) => sum + region.score, 0)
+                / ordered.length,
+        };
+    }
+
+    function generateBlocks(columnRegions) {
+        const ordered = [...columnRegions].sort((left, right) => (
+            centerY(left) - centerY(right) || centerX(left) - centerX(right)
+        ));
+        const centerGaps = [];
+        for (let index = 1; index < ordered.length; index += 1) {
+            const gap = centerY(ordered[index]) - centerY(ordered[index - 1]);
+            if (gap > 0) {
+                centerGaps.push(gap);
+            }
+        }
+        const typicalRowPitch = centerGaps.length >= 3
+            ? median(centerGaps)
+            : Number.POSITIVE_INFINITY;
+        const blocks = [];
+        for (let start = 0; start < ordered.length; start += 1) {
+            const parts = [];
+            for (let end = start; end < ordered.length; end += 1) {
+                if (end > start) {
+                    const previous = ordered[end - 1];
+                    const current = ordered[end];
+                    const verticalGap = current.box[1] - previous.box[3];
+                    const centerGap = centerY(current) - centerY(previous);
+                    const allowedGap = Math.max(
+                        regionHeight(previous),
+                        regionHeight(current),
+                    ) * 0.55;
+                    if (
+                        verticalGap > allowedGap
+                        || centerGap >= typicalRowPitch * 0.85
+                    ) {
+                        break;
+                    }
+                }
+                parts.push(ordered[end]);
+                blocks.push(combineRegions(parts));
+            }
+        }
+        return blocks;
+    }
+
+    function blockContains(block, regionId) {
+        return block.regionIds.includes(regionId);
+    }
+
+    function blockUsesAny(block, regionIds) {
+        return block.regionIds.some(regionId => regionIds.has(regionId));
+    }
+
     function pairFeatures(keyRegion, valueRegion) {
         const averageHeight = (
             regionHeight(keyRegion) + regionHeight(valueRegion)
         ) / 2;
         return {
-            keyX: centerX(keyRegion) / PAGE_WIDTH,
-            valueX: centerX(valueRegion) / PAGE_WIDTH,
-            deltaX: (centerX(valueRegion) - centerX(keyRegion)) / PAGE_WIDTH,
+            keyX: keyRegion.box[0] / PAGE_WIDTH,
+            valueX: valueRegion.box[0] / PAGE_WIDTH,
+            deltaX: (valueRegion.box[0] - keyRegion.box[0]) / PAGE_WIDTH,
             rowOffset: Math.abs(
                 centerY(valueRegion) - centerY(keyRegion),
             ) / Math.max(averageHeight, 1),
@@ -484,13 +574,60 @@ def build_html(image_name, image_width, image_height, regions):
         };
     }
 
+    function buildExample(keyId, valueId) {
+        const keyAnchor = regionById.get(keyId);
+        const valueAnchor = regionById.get(valueId);
+        const usedRegionIds = new Set(state.examples.flatMap(example => (
+            [...example.key.regionIds, ...example.value.regionIds]
+        )));
+        const keyColumn = regions.filter(region => (
+            !usedRegionIds.has(region.id)
+            && Math.abs(region.box[0] - keyAnchor.box[0]) / PAGE_WIDTH <= 0.055
+        ));
+        const valueColumn = regions.filter(region => (
+            !usedRegionIds.has(region.id)
+            && Math.abs(region.box[0] - valueAnchor.box[0]) / PAGE_WIDTH <= 0.055
+        ));
+        const keyBlocks = generateBlocks(keyColumn).filter(block => (
+            blockContains(block, keyId)
+        ));
+        const valueBlocks = generateBlocks(valueColumn).filter(block => (
+            blockContains(block, valueId)
+        ));
+        const direction = valueAnchor.box[0] >= keyAnchor.box[0] ? 1 : -1;
+        let bestExample = null;
+        let bestCost = Number.POSITIVE_INFINITY;
+
+        for (const key of keyBlocks) {
+            for (const value of valueBlocks) {
+                const features = pairFeatures(key, value);
+                if (direction * features.deltaX <= 0) {
+                    continue;
+                }
+                const extraLines = (
+                    key.regionIds.length + value.regionIds.length - 2
+                );
+                const cost = (
+                    features.rowOffset * 0.55
+                    + (1 - features.overlap) * 0.35
+                    + extraLines * 0.05
+                );
+                if (cost < bestCost) {
+                    bestCost = cost;
+                    bestExample = {key, value};
+                }
+            }
+        }
+        return bestExample;
+    }
+
     function inferRule() {
         if (state.examples.length === 0) {
             return null;
         }
         const features = state.examples.map(example => pairFeatures(
-            regionById.get(example.keyId),
-            regionById.get(example.valueId),
+            example.key,
+            example.value,
         ));
         const keyXs = features.map(feature => feature.keyX);
         const valueXs = features.map(feature => feature.valueX);
@@ -498,12 +635,16 @@ def build_html(image_name, image_width, image_height, regions):
         const keyX = median(keyXs);
         const valueX = median(valueXs);
         const deltaX = median(deltaXs);
+        const firstExample = state.examples[0];
+        const startY = (
+            centerY(firstExample.key) + centerY(firstExample.value)
+        ) / 2;
         const sampleCount = features.length;
         const baseColumnTolerance = sampleCount === 1
-            ? 0.12
+            ? 0.06
             : sampleCount === 2
-                ? 0.075
-                : 0.05;
+                ? 0.04
+                : 0.03;
         const keyTolerance = Math.max(
             baseColumnTolerance,
             maxDeviation(keyXs, keyX) * 1.5 + 0.015,
@@ -534,6 +675,7 @@ def build_html(image_name, image_width, image_height, regions):
             ),
             keyTypes: new Set(features.map(feature => feature.keyType)),
             valueTypes: new Set(features.map(feature => feature.valueType)),
+            startY,
             sampleCount,
         };
     }
@@ -544,22 +686,49 @@ def build_html(image_name, image_width, image_height, regions):
 
     function predictPairs(rule) {
         const candidates = [];
-        const manualKeyIds = new Set(state.examples.map(example => example.keyId));
-        const manualValueIds = new Set(state.examples.map(example => example.valueId));
+        const manualRegionIds = new Set(state.examples.flatMap(example => (
+            [...example.key.regionIds, ...example.value.regionIds]
+        )));
+        const keyRegions = regions.filter(region => (
+            !manualRegionIds.has(region.id)
+            && Math.abs(region.box[0] / PAGE_WIDTH - rule.keyX)
+                <= rule.keyTolerance
+        ));
+        const valueRegions = regions.filter(region => (
+            !manualRegionIds.has(region.id)
+            && Math.abs(region.box[0] / PAGE_WIDTH - rule.valueX)
+                <= rule.valueTolerance
+        ));
+        const keyBlocks = generateBlocks(keyRegions);
+        const valueBlocks = generateBlocks(valueRegions);
 
-        for (const keyRegion of regions) {
-            if (manualKeyIds.has(keyRegion.id) || manualValueIds.has(keyRegion.id)) {
-                continue;
-            }
-            for (const valueRegion of regions) {
-                if (
-                    keyRegion.id === valueRegion.id
-                    || manualKeyIds.has(valueRegion.id)
-                    || manualValueIds.has(valueRegion.id)
-                ) {
+        for (const keyRegion of keyBlocks) {
+            for (const valueRegion of valueBlocks) {
+                const keyIds = new Set(keyRegion.regionIds);
+                if (valueRegion.regionIds.some(regionId => keyIds.has(regionId))) {
+                    continue;
+                }
+                const valueIds = new Set(valueRegion.regionIds);
+                const crossesOtherKey = keyRegions.some(region => (
+                    !keyIds.has(region.id)
+                    && centerY(region) >= valueRegion.box[1]
+                    && centerY(region) <= valueRegion.box[3]
+                ));
+                const crossesOtherValue = valueRegions.some(region => (
+                    !valueIds.has(region.id)
+                    && centerY(region) >= keyRegion.box[1]
+                    && centerY(region) <= keyRegion.box[3]
+                ));
+                if (crossesOtherKey || crossesOtherValue) {
                     continue;
                 }
                 const features = pairFeatures(keyRegion, valueRegion);
+                const candidateY = (
+                    centerY(keyRegion) + centerY(valueRegion)
+                ) / 2;
+                if (candidateY < rule.startY) {
+                    continue;
+                }
                 if (rule.direction * features.deltaX <= 0) {
                     continue;
                 }
@@ -602,17 +771,24 @@ def build_html(image_name, image_width, image_height, regions):
                     (rule.keyTypes.has(features.keyType) ? 0.5 : 0.25)
                     + (rule.valueTypes.has(features.valueType) ? 0.5 : 0.25)
                 );
+                const groupPenalty = (
+                    keyRegion.regionIds.length
+                    + valueRegion.regionIds.length
+                    - 2
+                ) * 0.015;
                 const score = (
-                    keyColumnScore * 0.24
-                    + valueColumnScore * 0.24
-                    + distanceScore * 0.20
-                    + rowScore * 0.22
+                    keyColumnScore * 0.20
+                    + valueColumnScore * 0.20
+                    + distanceScore * 0.16
+                    + rowScore * 0.19
+                    + features.overlap * 0.15
                     + typeScore * 0.10
+                    - groupPenalty
                 );
                 if (score >= 0.58) {
                     candidates.push({
-                        keyId: keyRegion.id,
-                        valueId: valueRegion.id,
+                        key: keyRegion,
+                        value: valueRegion,
                         score,
                     });
                 }
@@ -620,21 +796,22 @@ def build_html(image_name, image_width, image_height, regions):
         }
 
         candidates.sort((left, right) => right.score - left.score);
-        const usedKeys = new Set(manualKeyIds);
-        const usedValues = new Set(manualValueIds);
+        const usedRegionIds = new Set(manualRegionIds);
         const predictions = [];
         for (const candidate of candidates) {
             if (
-                usedKeys.has(candidate.keyId)
-                || usedValues.has(candidate.valueId)
-                || usedValues.has(candidate.keyId)
-                || usedKeys.has(candidate.valueId)
+                blockUsesAny(candidate.key, usedRegionIds)
+                || blockUsesAny(candidate.value, usedRegionIds)
             ) {
                 continue;
             }
             predictions.push(candidate);
-            usedKeys.add(candidate.keyId);
-            usedValues.add(candidate.valueId);
+            for (const regionId of candidate.key.regionIds) {
+                usedRegionIds.add(regionId);
+            }
+            for (const regionId of candidate.value.regionIds) {
+                usedRegionIds.add(regionId);
+            }
         }
         return predictions;
     }
@@ -655,22 +832,17 @@ def build_html(image_name, image_width, image_height, regions):
             box.style.zIndex = String(
                 Math.round(1000000 / Math.max(width * height, 1))
             );
-            box.title = `${region.id}: ${region.text} (${region.score.toFixed(4)})`;
-
-            const label = document.createElement("span");
-            label.className = "box-label";
-            label.textContent = region.id;
-            box.appendChild(label);
+            box.title = `${region.text} (${region.score.toFixed(4)})`;
             box.addEventListener("click", () => selectRegion(region.id));
             box.addEventListener("mouseenter", () => {
                 hoverInfo.textContent = (
-                    `${region.id} · OCR: “${region.text}” · `
+                    `OCR: “${region.text}” · `
                     + `Độ tin cậy: ${region.score.toFixed(4)}`
                 );
             });
             box.addEventListener("mouseleave", () => {
                 hoverInfo.textContent = (
-                    "Di chuột lên bbox để xem ID, nội dung OCR và độ tin cậy."
+                    "Di chuột lên bbox để xem nội dung OCR và độ tin cậy."
                 );
             });
             boxLayer.appendChild(box);
@@ -678,11 +850,51 @@ def build_html(image_name, image_width, image_height, regions):
         refreshBoxStyles();
     }
 
+    function appendLogicalBox(block, cssClass, labelText) {
+        if (block.regionIds.length === 1) {
+            return;
+        }
+        const box = document.createElement("div");
+        box.className = `logical-box ${cssClass}`;
+        box.style.left = `${block.box[0] / PAGE_WIDTH * 100}%`;
+        box.style.top = `${block.box[1] / PAGE_HEIGHT * 100}%`;
+        box.style.width = `${(block.box[2] - block.box[0]) / PAGE_WIDTH * 100}%`;
+        box.style.height = `${(block.box[3] - block.box[1]) / PAGE_HEIGHT * 100}%`;
+        const label = document.createElement("span");
+        label.textContent = `${labelText} · ${block.regionIds.length} bbox`;
+        box.appendChild(label);
+        logicalLayer.appendChild(box);
+    }
+
+    function renderLogicalBlocks() {
+        logicalLayer.replaceChildren();
+        for (const example of state.examples) {
+            appendLogicalBox(example.key, "manual-key", "KEY gộp");
+            appendLogicalBox(example.value, "manual-value", "VALUE gộp");
+        }
+        for (const prediction of state.predictions) {
+            appendLogicalBox(prediction.key, "predicted-key", "key? gộp");
+            appendLogicalBox(
+                prediction.value,
+                "predicted-value",
+                "value? gộp",
+            );
+        }
+    }
+
     function refreshBoxStyles() {
-        const manualKeys = new Set(state.examples.map(example => example.keyId));
-        const manualValues = new Set(state.examples.map(example => example.valueId));
-        const predictedKeys = new Set(state.predictions.map(pair => pair.keyId));
-        const predictedValues = new Set(state.predictions.map(pair => pair.valueId));
+        const manualKeys = new Set(state.examples.flatMap(example => (
+            example.key.regionIds
+        )));
+        const manualValues = new Set(state.examples.flatMap(example => (
+            example.value.regionIds
+        )));
+        const predictedKeys = new Set(state.predictions.flatMap(pair => (
+            pair.key.regionIds
+        )));
+        const predictedValues = new Set(state.predictions.flatMap(pair => (
+            pair.value.regionIds
+        )));
 
         for (const box of boxLayer.querySelectorAll(".ocr-box")) {
             const regionId = box.dataset.regionId;
@@ -692,31 +904,15 @@ def build_html(image_name, image_width, image_height, regions):
             box.classList.toggle("predicted-key", predictedKeys.has(regionId));
             box.classList.toggle("predicted-value", predictedValues.has(regionId));
             box.disabled = state.confirmed;
-            const label = box.querySelector(".box-label");
-            if (state.currentKeyId === regionId) {
-                label.textContent = `${regionId} · KEY`;
-            } else if (manualKeys.has(regionId)) {
-                label.textContent = `${regionId} · KEY mẫu`;
-            } else if (manualValues.has(regionId)) {
-                label.textContent = `${regionId} · VALUE mẫu`;
-            } else if (predictedKeys.has(regionId)) {
-                label.textContent = `${regionId} · key?`;
-            } else if (predictedValues.has(regionId)) {
-                label.textContent = `${regionId} · value?`;
-            } else {
-                label.textContent = regionId;
-            }
         }
     }
 
     function svgLine(pair, cssClass, color, dashArray) {
-        const keyRegion = regionById.get(pair.keyId);
-        const valueRegion = regionById.get(pair.valueId);
         const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        line.setAttribute("x1", centerX(keyRegion));
-        line.setAttribute("y1", centerY(keyRegion));
-        line.setAttribute("x2", centerX(valueRegion));
-        line.setAttribute("y2", centerY(valueRegion));
+        line.setAttribute("x1", centerX(pair.key));
+        line.setAttribute("y1", centerY(pair.key));
+        line.setAttribute("x2", centerX(pair.value));
+        line.setAttribute("y2", centerY(pair.value));
         line.setAttribute("stroke", color);
         line.setAttribute("stroke-width", "5");
         line.setAttribute("stroke-linecap", "round");
@@ -738,18 +934,16 @@ def build_html(image_name, image_width, image_height, regions):
     }
 
     function pairHtml(pair, includeScore) {
-        const keyRegion = regionById.get(pair.keyId);
-        const valueRegion = regionById.get(pair.valueId);
         const item = document.createElement("div");
         item.className = "pair-item";
 
         const key = document.createElement("strong");
-        key.textContent = `${pair.keyId}: ${keyRegion.text}`;
+        key.textContent = pair.key.text;
         const arrow = document.createElement("span");
         arrow.className = "pair-arrow";
         arrow.textContent = "→";
         const value = document.createElement("strong");
-        value.textContent = `${pair.valueId}: ${valueRegion.text}`;
+        value.textContent = pair.value.text;
         item.append(key, arrow, value);
         if (includeScore) {
             const score = document.createElement("div");
@@ -795,6 +989,7 @@ def build_html(image_name, image_width, image_height, regions):
             + `${(state.rule.keyX * 100).toFixed(1)}% `
             + `chiều rộng page; value quanh ${(state.rule.valueX * 100).toFixed(1)}%; `
             + `value nằm ${state.rule.direction > 0 ? "bên phải" : "bên trái"} key; `
+            + "chỉ suy luận từ hàng của mẫu đầu tiên trở xuống; "
             + `preview ${state.predictions.length} cặp.`
         );
     }
@@ -838,6 +1033,7 @@ def build_html(image_name, image_width, image_height, regions):
         state.rule = inferRule();
         state.predictions = state.rule ? predictPairs(state.rule) : [];
         refreshBoxStyles();
+        renderLogicalBlocks();
         renderLinks();
         renderLists();
         renderRuleSummary();
@@ -851,13 +1047,14 @@ def build_html(image_name, image_width, image_height, regions):
         }
         const region = regionById.get(regionId);
         const regionWasUsed = state.examples.some(example => (
-            example.keyId === regionId || example.valueId === regionId
+            example.key.regionIds.includes(regionId)
+            || example.value.regionIds.includes(regionId)
         ));
         if (!state.currentKeyId) {
             if (regionWasUsed) {
                 instruction.className = "instruction";
                 instruction.textContent = (
-                    `${regionId} đã thuộc một cặp mẫu. `
+                    `“${region.text}” đã thuộc một cặp mẫu. `
                     + "Hãy chọn một bbox chưa được dùng làm key mới."
                 );
                 return;
@@ -865,7 +1062,7 @@ def build_html(image_name, image_width, image_height, regions):
             state.currentKeyId = regionId;
             instruction.className = "instruction wait-value";
             instruction.textContent = (
-                `Đã chọn key ${regionId}: “${region.text}”. `
+                `Đã chọn key: “${region.text}”. `
                 + "Bước tiếp theo: hãy bấm vào bbox chứa value tương ứng."
             );
             refreshBoxStyles();
@@ -883,19 +1080,29 @@ def build_html(image_name, image_width, image_height, regions):
         }
         if (regionWasUsed) {
             instruction.textContent = (
-                `${regionId} đã thuộc một cặp mẫu. `
+                `“${region.text}” đã thuộc một cặp mẫu. `
                 + "Hãy bấm một bbox chưa được dùng làm value."
             );
             return;
         }
 
         const keyId = state.currentKeyId;
-        state.examples.push({keyId, valueId: regionId});
+        const example = buildExample(keyId, regionId);
+        if (!example) {
+            instruction.textContent = (
+                "Không tạo được cặp logical block từ hai bbox này. "
+                + "Hãy bấm một bbox value ở cột đối diện key."
+            );
+            return;
+        }
+        state.examples.push(example);
         state.currentKeyId = null;
         recomputePreview();
         instruction.className = "instruction";
         instruction.textContent = (
-            `Đã thêm mẫu ${keyId} → ${regionId} và cập nhật preview. `
+            `Đã thêm mẫu “${example.key.text}” → “${example.value.text}” `
+            + "và cập nhật preview. "
+            + "Chương trình đã tự gộp các bbox liền kề khi chúng thuộc cùng hàng. "
             + "Nếu preview chưa phù hợp, hãy bấm một key khác rồi chọn value của nó. "
             + "Nếu đã đúng, bấm “Xác nhận kết quả”."
         );
@@ -934,13 +1141,11 @@ def build_html(image_name, image_width, image_height, regions):
     }
 
     function appendResultRow(index, pair, source, score) {
-        const keyRegion = regionById.get(pair.keyId);
-        const valueRegion = regionById.get(pair.valueId);
         const row = document.createElement("tr");
         const values = [
             String(index),
-            keyRegion.text,
-            valueRegion.text,
+            pair.key.text,
+            pair.value.text,
             source,
             score,
         ];
