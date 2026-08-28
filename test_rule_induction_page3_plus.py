@@ -276,6 +276,18 @@ def build_html(image_name, image_width, image_height, regions):
         }
         .pair-item strong { color: #0f172a; }
         .pair-arrow { color: var(--cam); font-weight: 700; padding: 0 5px; }
+        .pair-status {
+            color: #9a3412;
+            font-size: 12px;
+            font-weight: 700;
+            margin-top: 6px;
+        }
+        .remove-pair {
+            background: #fee2e2;
+            color: #991b1b;
+            margin-top: 8px;
+            padding: 6px 9px;
+        }
         .rule-summary {
             background: #faf5ff;
             border: 1px solid #ddd6fe;
@@ -334,6 +346,9 @@ def build_html(image_name, image_width, image_height, regions):
             <button class="secondary" id="undoExample" disabled>
                 Xóa mẫu gần nhất
             </button>
+            <button class="secondary" id="undoSuppression" disabled>
+                Hoàn tác cặp đã loại
+            </button>
             <button class="danger" id="resetAll" disabled>
                 Làm lại từ đầu
             </button>
@@ -390,6 +405,8 @@ def build_html(image_name, image_width, image_height, regions):
                 <div class="rule-summary" id="ruleSummary">
                     Chưa có rule. Số mẫu không bị giới hạn.
                 </div>
+                <div class="rule-summary" id="headerProbeSummary" hidden></div>
+                <div class="rule-summary" id="suppressionSummary" hidden></div>
             </section>
         </aside>
     </section>
@@ -421,6 +438,11 @@ def build_html(image_name, image_width, image_height, regions):
         predictions: [],
         rule: null,
         confirmed: false,
+        headerProbe: null,
+        autoHeaders: [],
+        suspectedHeaderIds: new Set(),
+        suppressedPairIds: new Set(),
+        suppressionHistory: [],
     };
 
     const boxLayer = document.getElementById("boxLayer");
@@ -430,6 +452,7 @@ def build_html(image_name, image_width, image_height, regions):
     const hoverInfo = document.getElementById("hoverInfo");
     const cancelKeyButton = document.getElementById("cancelKey");
     const undoExampleButton = document.getElementById("undoExample");
+    const undoSuppressionButton = document.getElementById("undoSuppression");
     const resetAllButton = document.getElementById("resetAll");
     const confirmResultButton = document.getElementById("confirmResult");
     const resultSection = document.getElementById("resultSection");
@@ -555,6 +578,58 @@ def build_html(image_name, image_width, image_height, regions):
 
     function blockUsesAny(block, regionIds) {
         return block.regionIds.some(regionId => regionIds.has(regionId));
+    }
+
+    function pairY(pair) {
+        return (centerY(pair.key) + centerY(pair.value)) / 2;
+    }
+
+    function pairInstanceId(pair) {
+        return `${pair.key.regionIds.join("+")}→${pair.value.regionIds.join("+")}`;
+    }
+
+    function normalizePairText(text) {
+        return text
+            .normalize("NFKC")
+            .toLocaleLowerCase("vi")
+            .replace(/\s+/gu, " ")
+            .replace(/\s*([:;=,])\s*/gu, "$1")
+            .trim();
+    }
+
+    function pairSignature(pair) {
+        return (
+            `${normalizePairText(pair.key.text)}`
+            + `→${normalizePairText(pair.value.text)}`
+        );
+    }
+
+    function hasHeaderStructure(pair) {
+        const pairRegionIds = new Set([
+            ...pair.key.regionIds,
+            ...pair.value.regionIds,
+        ]);
+        const averageHeight = (
+            regionHeight(pair.key) + regionHeight(pair.value)
+        ) / 2;
+        const currentY = pairY(pair);
+        const previousRegions = regions
+            .filter(region => (
+                !pairRegionIds.has(region.id)
+                && centerY(region) < currentY - averageHeight * 0.75
+            ))
+            .sort((left, right) => centerY(right) - centerY(left));
+        if (previousRegions.length === 0) {
+            return false;
+        }
+        const nearestPrevious = previousRegions[0];
+        const isWide = (
+            nearestPrevious.box[2] - nearestPrevious.box[0]
+        ) / PAGE_WIDTH >= 0.30;
+        return (
+            isWide
+            && currentY - centerY(nearestPrevious) <= averageHeight * 3
+        );
     }
 
     function pairFeatures(keyRegion, valueRegion) {
@@ -684,7 +759,7 @@ def build_html(image_name, image_width, image_height, regions):
         return Math.max(0, 1 - Math.abs(value - expected) / tolerance);
     }
 
-    function predictPairs(rule) {
+    function predictPairs(rule, includeAbove = false) {
         const candidates = [];
         const manualRegionIds = new Set(state.examples.flatMap(example => (
             [...example.key.regionIds, ...example.value.regionIds]
@@ -726,7 +801,7 @@ def build_html(image_name, image_width, image_height, regions):
                 const candidateY = (
                     centerY(keyRegion) + centerY(valueRegion)
                 ) / 2;
-                if (candidateY < rule.startY) {
+                if (!includeAbove && candidateY < rule.startY) {
                     continue;
                 }
                 if (rule.direction * features.deltaX <= 0) {
@@ -814,6 +889,59 @@ def build_html(image_name, image_width, image_height, regions):
             }
         }
         return predictions;
+    }
+
+    function classifyPredictions(rule) {
+        const allPredictions = predictPairs(rule, true);
+        const predictionsAbove = allPredictions
+            .filter(pair => pairY(pair) < rule.startY)
+            .sort((left, right) => pairY(right) - pairY(left));
+        state.headerProbe = predictionsAbove[0] || null;
+
+        const predictionsBelow = allPredictions.filter(pair => (
+            pairY(pair) >= rule.startY
+        ));
+        const pairsBySignature = new Map();
+        for (const pair of predictionsBelow) {
+            const signature = pairSignature(pair);
+            if (!pairsBySignature.has(signature)) {
+                pairsBySignature.set(signature, []);
+            }
+            pairsBySignature.get(signature).push(pair);
+        }
+
+        const automaticHeaderSignatures = new Set();
+        if (state.headerProbe) {
+            automaticHeaderSignatures.add(pairSignature(state.headerProbe));
+        }
+        for (const [signature, pairs] of pairsBySignature.entries()) {
+            if (
+                pairs.length >= 2
+                && pairs.some(pair => hasHeaderStructure(pair))
+            ) {
+                automaticHeaderSignatures.add(signature);
+            }
+        }
+
+        state.autoHeaders = predictionsBelow.filter(pair => (
+            automaticHeaderSignatures.has(pairSignature(pair))
+        ));
+        state.suspectedHeaderIds = new Set();
+        for (const [signature, pairs] of pairsBySignature.entries()) {
+            if (
+                pairs.length >= 2
+                && !automaticHeaderSignatures.has(signature)
+            ) {
+                for (const pair of pairs) {
+                    state.suspectedHeaderIds.add(pairInstanceId(pair));
+                }
+            }
+        }
+
+        state.predictions = predictionsBelow.filter(pair => (
+            !automaticHeaderSignatures.has(pairSignature(pair))
+            && !state.suppressedPairIds.has(pairInstanceId(pair))
+        ));
     }
 
     function renderBoxes() {
@@ -933,7 +1061,7 @@ def build_html(image_name, image_width, image_height, regions):
         }
     }
 
-    function pairHtml(pair, includeScore) {
+    function pairHtml(pair, includeScore, allowRemoval = false) {
         const item = document.createElement("div");
         item.className = "pair-item";
 
@@ -950,7 +1078,50 @@ def build_html(image_name, image_width, image_height, regions):
             score.textContent = `Độ tin cậy: ${(pair.score * 100).toFixed(1)}%`;
             item.appendChild(score);
         }
+        if (state.suspectedHeaderIds.has(pairInstanceId(pair))) {
+            const status = document.createElement("div");
+            status.className = "pair-status";
+            status.textContent = "Nghi là header vì nội dung lặp lại.";
+            item.appendChild(status);
+        }
+        if (allowRemoval) {
+            const removeButton = document.createElement("button");
+            removeButton.type = "button";
+            removeButton.className = "remove-pair";
+            removeButton.textContent = "Loại cặp này";
+            removeButton.disabled = state.confirmed;
+            removeButton.addEventListener("click", () => suppressPrediction(pair));
+            item.appendChild(removeButton);
+        }
         return item;
+    }
+
+    function renderSuppressionSummary() {
+        const probeSummary = document.getElementById("headerProbeSummary");
+        const suppressionSummary = document.getElementById("suppressionSummary");
+        if (state.headerProbe) {
+            probeSummary.hidden = false;
+            probeSummary.textContent = (
+                `Mẫu tham chiếu phía trên: “${state.headerProbe.key.text}” → `
+                + `“${state.headerProbe.value.text}”. `
+                + "Mẫu này không được đưa vào kết quả."
+            );
+        } else {
+            probeSummary.hidden = true;
+            probeSummary.textContent = "";
+        }
+
+        const manualCount = state.suppressedPairIds.size;
+        if (state.autoHeaders.length > 0 || manualCount > 0) {
+            suppressionSummary.hidden = false;
+            suppressionSummary.textContent = (
+                `Đã tự ẩn ${state.autoHeaders.length} header; `
+                + `đã loại thủ công ${manualCount} cặp.`
+            );
+        } else {
+            suppressionSummary.hidden = true;
+            suppressionSummary.textContent = "";
+        }
     }
 
     function renderLists() {
@@ -964,7 +1135,7 @@ def build_html(image_name, image_width, image_height, regions):
             exampleList.appendChild(pairHtml(example, false));
         }
         for (const prediction of state.predictions) {
-            previewList.appendChild(pairHtml(prediction, true));
+            previewList.appendChild(pairHtml(prediction, true, true));
         }
         document.getElementById("exampleCount").textContent = state.examples.length;
         document.getElementById("previewCount").textContent = state.predictions.length;
@@ -976,6 +1147,7 @@ def build_html(image_name, image_width, image_height, regions):
                 + "hoặc kiểm tra lại mẫu vừa chọn."
             );
         }
+        renderSuppressionSummary();
     }
 
     function renderRuleSummary() {
@@ -989,7 +1161,8 @@ def build_html(image_name, image_width, image_height, regions):
             + `${(state.rule.keyX * 100).toFixed(1)}% `
             + `chiều rộng page; value quanh ${(state.rule.valueX * 100).toFixed(1)}%; `
             + `value nằm ${state.rule.direction > 0 ? "bên phải" : "bên trái"} key; `
-            + "chỉ suy luận từ hàng của mẫu đầu tiên trở xuống; "
+            + "dùng một probe phía trên nhưng chỉ xuất kết quả từ mẫu đầu tiên "
+            + "trở xuống; "
             + `preview ${state.predictions.length} cặp.`
         );
     }
@@ -1023,6 +1196,9 @@ def build_html(image_name, image_width, image_height, regions):
     function updateButtons() {
         cancelKeyButton.disabled = !state.currentKeyId || state.confirmed;
         undoExampleButton.disabled = state.examples.length === 0 || state.confirmed;
+        undoSuppressionButton.disabled = (
+            state.suppressionHistory.length === 0 || state.confirmed
+        );
         resetAllButton.disabled = (
             state.examples.length === 0 && !state.currentKeyId
         ) || state.confirmed;
@@ -1031,7 +1207,14 @@ def build_html(image_name, image_width, image_height, regions):
 
     function recomputePreview() {
         state.rule = inferRule();
-        state.predictions = state.rule ? predictPairs(state.rule) : [];
+        if (state.rule) {
+            classifyPredictions(state.rule);
+        } else {
+            state.predictions = [];
+            state.headerProbe = null;
+            state.autoHeaders = [];
+            state.suspectedHeaderIds = new Set();
+        }
         refreshBoxStyles();
         renderLogicalBlocks();
         renderLinks();
@@ -1039,6 +1222,32 @@ def build_html(image_name, image_width, image_height, regions):
         renderRuleSummary();
         updateSteps();
         updateButtons();
+    }
+
+    function suppressPrediction(pair) {
+        if (state.confirmed) {
+            return;
+        }
+        const pairId = pairInstanceId(pair);
+        state.suppressedPairIds.add(pairId);
+        state.suppressionHistory.push(pairId);
+        recomputePreview();
+        instruction.className = "instruction";
+        instruction.textContent = (
+            `Đã loại “${pair.key.text}” → “${pair.value.text}”. `
+            + "Thao tác này không thay đổi rule hoặc các cặp khác."
+        );
+    }
+
+    function undoLastSuppression() {
+        const pairId = state.suppressionHistory.pop();
+        if (!pairId) {
+            return;
+        }
+        state.suppressedPairIds.delete(pairId);
+        recomputePreview();
+        instruction.className = "instruction";
+        instruction.textContent = "Đã khôi phục cặp bị loại gần nhất.";
     }
 
     function selectRegion(regionId) {
@@ -1132,6 +1341,11 @@ def build_html(image_name, image_width, image_height, regions):
         state.predictions = [];
         state.rule = null;
         state.confirmed = false;
+        state.headerProbe = null;
+        state.autoHeaders = [];
+        state.suspectedHeaderIds = new Set();
+        state.suppressedPairIds = new Set();
+        state.suppressionHistory = [];
         resultSection.hidden = true;
         instruction.className = "instruction";
         instruction.textContent = (
@@ -1190,6 +1404,7 @@ def build_html(image_name, image_width, image_height, regions):
             + "dữ liệu chưa được lưu ra file."
         );
         refreshBoxStyles();
+        renderLists();
         updateSteps();
         updateButtons();
         resultSection.scrollIntoView({behavior: "smooth", block: "start"});
@@ -1197,6 +1412,7 @@ def build_html(image_name, image_width, image_height, regions):
 
     cancelKeyButton.addEventListener("click", cancelCurrentKey);
     undoExampleButton.addEventListener("click", undoLastExample);
+    undoSuppressionButton.addEventListener("click", undoLastSuppression);
     resetAllButton.addEventListener("click", resetAll);
     confirmResultButton.addEventListener("click", confirmResults);
 
