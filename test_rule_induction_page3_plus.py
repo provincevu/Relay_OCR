@@ -801,7 +801,30 @@ def build_html(image_name, image_width, image_height, regions):
         };
     }
 
-    function splitInlineText(text, separators) {
+    function separatorIsTopLevel(text, separatorIndex) {
+        let depth = 0;
+        const opening = "([{";
+        const closing = ")]}";
+        for (let index = 0; index < separatorIndex; index += 1) {
+            if (opening.includes(text[index])) {
+                depth += 1;
+            } else if (closing.includes(text[index])) {
+                depth = Math.max(0, depth - 1);
+            }
+        }
+        return depth === 0;
+    }
+
+    function isCompactInlineKey(key) {
+        const words = key.trim().split(/\s+/u);
+        return (
+            words.length <= 4
+            && !/[()[\]{}]/u.test(key)
+            && /[\p{L}\p{N}]/u.test(key)
+        );
+    }
+
+    function splitInlineText(text, separators, automatic = false) {
         for (const separator of separators) {
             if (!separator) {
                 continue;
@@ -814,6 +837,15 @@ def build_html(image_name, image_width, image_height, regions):
             const value = text.slice(
                 separatorIndex + separator.length,
             ).trim();
+            if (
+                automatic
+                && (
+                    !separatorIsTopLevel(text, separatorIndex)
+                    || !isCompactInlineKey(key)
+                )
+            ) {
+                continue;
+            }
             if (key && value) {
                 return {key, value, separator};
             }
@@ -863,7 +895,11 @@ def build_html(image_name, image_width, image_height, regions):
             ) {
                 continue;
             }
-            const split = splitInlineText(region.text, rule.separators);
+            const split = splitInlineText(
+                region.text,
+                rule.separators,
+                true,
+            );
             if (!split) {
                 continue;
             }
@@ -1497,6 +1533,7 @@ def build_html(image_name, image_width, image_height, regions):
         const split = splitInlineText(
             region.text,
             automaticInlineSeparators,
+            true,
         );
         state.inlineRegionId = regionId;
         inlineOriginal.textContent = `OCR gốc: “${region.text}”`;
