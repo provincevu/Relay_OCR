@@ -84,6 +84,19 @@ def build_html(image_name, image_width, image_height, regions):
         }
         .step.active { background: #dbeafe; color: #1d4ed8; }
         .step.done { background: #dcfce7; color: #166534; }
+        .selection-status {
+            align-items: center;
+            background: #f8fafc;
+            border: 1px solid #cbd5e1;
+            border-radius: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 10px;
+            padding: 9px 12px;
+        }
+        .selection-status span { color: #64748b; font-size: 13px; }
+        .selection-status strong { color: #1d4ed8; font-size: 15px; }
         .instruction {
             background: #eff6ff;
             border-left: 5px solid #2563eb;
@@ -200,6 +213,7 @@ def build_html(image_name, image_width, image_height, regions):
             border-color: #ca8a04;
             box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.40);
         }
+        .ocr-box.hidden-unused { display: none; }
         .ocr-box.ocr-box.current-key {
             animation: pulse 1.1s infinite;
             background: rgba(21, 128, 61, 0.25);
@@ -378,6 +392,10 @@ def build_html(image_name, image_width, image_height, regions):
             <span class="step" id="stepPreview">3. Kiểm tra preview</span>
             <span class="step" id="stepConfirm">4. Xác nhận</span>
         </div>
+        <div class="selection-status" role="status" aria-live="polite">
+            <span>Trạng thái hiện tại:</span>
+            <strong id="selectionStatus">Đang chờ chọn KEY đầu tiên</strong>
+        </div>
         <div class="instruction" id="instruction" role="status" aria-live="polite">
             Bước 1: Hãy bấm vào bbox chứa key đầu tiên trên ảnh.
         </div>
@@ -459,6 +477,9 @@ def build_html(image_name, image_width, image_height, regions):
                         <span class="swatch inline"></span>Inline key=value
                     </span>
                 </div>
+                <button class="secondary" id="toggleUnusedRegions" disabled>
+                    Ẩn bbox xám
+                </button>
             </div>
             <div class="image-stage" id="imageStage">
                 <img id="pageImage" src="__IMAGE_NAME__" alt="Ảnh page cần phân tích">
@@ -528,12 +549,14 @@ def build_html(image_name, image_width, image_height, regions):
         suspectedHeaderIds: new Set(),
         suppressedPairIds: new Set(),
         suppressionHistory: [],
+        hideUnusedRegions: false,
     };
 
     const boxLayer = document.getElementById("boxLayer");
     const linkLayer = document.getElementById("linkLayer");
     const logicalLayer = document.getElementById("logicalLayer");
     const instruction = document.getElementById("instruction");
+    const selectionStatus = document.getElementById("selectionStatus");
     const hoverInfo = document.getElementById("hoverInfo");
     const cancelKeyButton = document.getElementById("cancelKey");
     const inlineCurrentKeyButton = document.getElementById("inlineCurrentKey");
@@ -541,6 +564,9 @@ def build_html(image_name, image_width, image_height, regions):
     const undoSuppressionButton = document.getElementById("undoSuppression");
     const resetAllButton = document.getElementById("resetAll");
     const confirmResultButton = document.getElementById("confirmResult");
+    const toggleUnusedRegionsButton = document.getElementById(
+        "toggleUnusedRegions",
+    );
     const resultSection = document.getElementById("resultSection");
     const inlineDialog = document.getElementById("inlineDialog");
     const inlineOriginal = document.getElementById("inlineOriginal");
@@ -1262,9 +1288,24 @@ def build_html(image_name, image_width, image_height, regions):
         const predictedInline = new Set(state.predictions
             .filter(pair => pair.mode === "inline")
             .flatMap(pair => pair.key.regionIds));
+        const usedRegionIds = new Set([
+            ...manualKeys,
+            ...manualValues,
+            ...predictedKeys,
+            ...predictedValues,
+            ...manualInline,
+            ...predictedInline,
+        ]);
+        if (state.currentKeyId) {
+            usedRegionIds.add(state.currentKeyId);
+        }
 
         for (const box of boxLayer.querySelectorAll(".ocr-box")) {
             const regionId = box.dataset.regionId;
+            box.classList.toggle(
+                "hidden-unused",
+                state.hideUnusedRegions && !usedRegionIds.has(regionId),
+            );
             box.classList.toggle("current-key", state.currentKeyId === regionId);
             box.classList.toggle("manual-key", manualKeys.has(regionId));
             box.classList.toggle("manual-value", manualValues.has(regionId));
@@ -1437,16 +1478,22 @@ def build_html(image_name, image_width, image_height, regions):
             step.classList.remove("active", "done");
         }
         if (state.confirmed) {
+            selectionStatus.textContent = "Đã xác nhận kết quả";
             for (const step of [stepKey, stepValue, stepPreview, stepConfirm]) {
                 step.classList.add("done");
             }
             return;
         }
         if (state.currentKeyId) {
+            const keyText = regionById.get(state.currentKeyId).text;
+            selectionStatus.textContent = `Đang chờ chọn VALUE cho “${keyText}”`;
             stepKey.classList.add("done");
             stepValue.classList.add("active");
             return;
         }
+        selectionStatus.textContent = state.examples.length > 0
+            ? "Đang kiểm tra preview — chọn thêm KEY hoặc xác nhận"
+            : "Đang chờ chọn KEY đầu tiên";
         stepKey.classList.add("active");
         if (state.examples.length > 0) {
             stepPreview.classList.add("done");
@@ -1465,6 +1512,10 @@ def build_html(image_name, image_width, image_height, regions):
             state.examples.length === 0 && !state.currentKeyId
         ) || state.confirmed;
         confirmResultButton.disabled = state.examples.length === 0 || state.confirmed;
+        toggleUnusedRegionsButton.disabled = state.examples.length === 0;
+        toggleUnusedRegionsButton.textContent = state.hideUnusedRegions
+            ? "Hiện tất cả bbox OCR"
+            : "Ẩn bbox xám";
     }
 
     function recomputePreview() {
@@ -1674,6 +1725,9 @@ def build_html(image_name, image_width, image_height, regions):
 
     function undoLastExample() {
         state.examples.pop();
+        if (state.examples.length === 0) {
+            state.hideUnusedRegions = false;
+        }
         recomputePreview();
         instruction.className = "instruction";
         instruction.textContent = state.examples.length > 0
@@ -1694,6 +1748,7 @@ def build_html(image_name, image_width, image_height, regions):
         state.suspectedHeaderIds = new Set();
         state.suppressedPairIds = new Set();
         state.suppressionHistory = [];
+        state.hideUnusedRegions = false;
         resultSection.hidden = true;
         instruction.className = "instruction";
         instruction.textContent = (
@@ -1758,6 +1813,12 @@ def build_html(image_name, image_width, image_height, regions):
         resultSection.scrollIntoView({behavior: "smooth", block: "start"});
     }
 
+    function toggleUnusedRegions() {
+        state.hideUnusedRegions = !state.hideUnusedRegions;
+        refreshBoxStyles();
+        updateButtons();
+    }
+
     cancelKeyButton.addEventListener("click", cancelCurrentKey);
     inlineCurrentKeyButton.addEventListener("click", () => {
         openInlineEditor(state.currentKeyId);
@@ -1766,6 +1827,7 @@ def build_html(image_name, image_width, image_height, regions):
     undoSuppressionButton.addEventListener("click", undoLastSuppression);
     resetAllButton.addEventListener("click", resetAll);
     confirmResultButton.addEventListener("click", confirmResults);
+    toggleUnusedRegionsButton.addEventListener("click", toggleUnusedRegions);
     inlineSeparator.addEventListener("change", updateInlineFieldsFromSeparator);
     cancelInlineButton.addEventListener("click", cancelInlineSelection);
     confirmInlineButton.addEventListener("click", confirmInlineSelection);
