@@ -214,6 +214,9 @@ def build_html(image_name, image_width, image_height, regions):
             box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.40);
         }
         .ocr-box.hidden-unused { display: none; }
+        .ocr-box.popover-target {
+            box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.60);
+        }
         .ocr-box.ocr-box.current-key {
             animation: pulse 1.1s infinite;
             background: rgba(21, 128, 61, 0.25);
@@ -281,6 +284,20 @@ def build_html(image_name, image_width, image_height, regions):
             border-style: dashed;
         }
         .logical-box.predicted-value span { background: var(--hong); }
+        .pair-popover {
+            background: white;
+            border: 1px solid #94a3b8;
+            border-radius: 9px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.24);
+            display: flex;
+            gap: 7px;
+            line-height: normal;
+            padding: 7px;
+            position: absolute;
+            transform: translate(-50%, calc(-100% - 8px));
+            z-index: 40;
+        }
+        .pair-popover[hidden] { display: none; }
         @keyframes pulse {
             50% { box-shadow: 0 0 0 6px rgba(21, 128, 61, 0.10); }
         }
@@ -413,7 +430,7 @@ def build_html(image_name, image_width, image_height, regions):
                 Xóa mẫu gần nhất
             </button>
             <button class="secondary" id="undoSuppression" disabled>
-                Hoàn tác cặp đã loại
+                Hoàn tác cặp đã xóa
             </button>
             <button class="danger" id="resetAll" disabled>
                 Làm lại từ đầu
@@ -488,6 +505,20 @@ def build_html(image_name, image_width, image_height, regions):
                      preserveAspectRatio="none"></svg>
                 <div class="box-layer" id="boxLayer"></div>
                 <div class="logical-layer" id="logicalLayer"></div>
+                <div
+                    class="pair-popover"
+                    id="pairPopover"
+                    role="toolbar"
+                    aria-label="Hành động với cặp preview"
+                    hidden
+                >
+                    <button class="secondary" id="editPrediction" type="button">
+                        Sửa
+                    </button>
+                    <button class="danger" id="deletePrediction" type="button">
+                        Xóa
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -550,6 +581,8 @@ def build_html(image_name, image_width, image_height, regions):
         suppressedPairIds: new Set(),
         suppressionHistory: [],
         hideUnusedRegions: false,
+        popoverPair: null,
+        editingPrediction: null,
     };
 
     const boxLayer = document.getElementById("boxLayer");
@@ -567,6 +600,9 @@ def build_html(image_name, image_width, image_height, regions):
     const toggleUnusedRegionsButton = document.getElementById(
         "toggleUnusedRegions",
     );
+    const pairPopover = document.getElementById("pairPopover");
+    const editPredictionButton = document.getElementById("editPrediction");
+    const deletePredictionButton = document.getElementById("deletePrediction");
     const resultSection = document.getElementById("resultSection");
     const inlineDialog = document.getElementById("inlineDialog");
     const inlineOriginal = document.getElementById("inlineOriginal");
@@ -1212,7 +1248,10 @@ def build_html(image_name, image_width, image_height, regions):
                 Math.round(1000000 / Math.max(width * height, 1))
             );
             box.title = `${region.text} (${region.score.toFixed(4)})`;
-            box.addEventListener("click", () => selectRegion(region.id));
+            box.addEventListener("click", (event) => {
+                event.stopPropagation();
+                selectRegion(region.id);
+            });
             box.addEventListener("mouseenter", () => {
                 hoverInfo.textContent = (
                     `OCR: “${region.text}” · `
@@ -1226,6 +1265,31 @@ def build_html(image_name, image_width, image_height, regions):
             });
             boxLayer.appendChild(box);
         }
+        refreshBoxStyles();
+    }
+
+    function predictionForRegion(regionId) {
+        return state.predictions.find(pair => (
+            pair.key.regionIds.includes(regionId)
+            || pair.value.regionIds.includes(regionId)
+        ));
+    }
+
+    function closePredictionPopover() {
+        pairPopover.hidden = true;
+        state.popoverPair = null;
+        refreshBoxStyles();
+    }
+
+    function openPredictionPopover(pair) {
+        state.popoverPair = pair;
+        const left = Math.min(pair.key.box[0], pair.value.box[0]);
+        const right = Math.max(pair.key.box[2], pair.value.box[2]);
+        const top = Math.min(pair.key.box[1], pair.value.box[1]);
+        const center = Math.min(Math.max((left + right) / 2, 0), PAGE_WIDTH);
+        pairPopover.style.left = `${center / PAGE_WIDTH * 100}%`;
+        pairPopover.style.top = `${top / PAGE_HEIGHT * 100}%`;
+        pairPopover.hidden = false;
         refreshBoxStyles();
     }
 
@@ -1299,6 +1363,12 @@ def build_html(image_name, image_width, image_height, regions):
         if (state.currentKeyId) {
             usedRegionIds.add(state.currentKeyId);
         }
+        const popoverRegionIds = new Set(state.popoverPair
+            ? [
+                ...state.popoverPair.key.regionIds,
+                ...state.popoverPair.value.regionIds,
+            ]
+            : []);
 
         for (const box of boxLayer.querySelectorAll(".ocr-box")) {
             const regionId = box.dataset.regionId;
@@ -1313,6 +1383,7 @@ def build_html(image_name, image_width, image_height, regions):
             box.classList.toggle("predicted-value", predictedValues.has(regionId));
             box.classList.toggle("manual-inline", manualInline.has(regionId));
             box.classList.toggle("predicted-inline", predictedInline.has(regionId));
+            box.classList.toggle("popover-target", popoverRegionIds.has(regionId));
             box.disabled = state.confirmed;
         }
     }
@@ -1380,7 +1451,7 @@ def build_html(image_name, image_width, image_height, regions):
             const removeButton = document.createElement("button");
             removeButton.type = "button";
             removeButton.className = "remove-pair";
-            removeButton.textContent = "Loại cặp này";
+            removeButton.textContent = "Xóa cặp này";
             removeButton.disabled = state.confirmed;
             removeButton.addEventListener("click", () => suppressPrediction(pair));
             item.appendChild(removeButton);
@@ -1403,12 +1474,13 @@ def build_html(image_name, image_width, image_height, regions):
             probeSummary.textContent = "";
         }
 
-        const manualCount = state.suppressedPairIds.size;
+        const manualCount = state.suppressedPairIds.size
+            - (state.editingPrediction ? 1 : 0);
         if (state.autoHeaders.length > 0 || manualCount > 0) {
             suppressionSummary.hidden = false;
             suppressionSummary.textContent = (
                 `Đã tự ẩn ${state.autoHeaders.length} header; `
-                + `đã loại thủ công ${manualCount} cặp.`
+                + `đã xóa thủ công ${manualCount} cặp.`
             );
         } else {
             suppressionSummary.hidden = true;
@@ -1485,7 +1557,9 @@ def build_html(image_name, image_width, image_height, regions):
             return;
         }
         if (state.currentKeyId) {
-            const keyText = regionById.get(state.currentKeyId).text;
+            const keyText = state.editingPrediction
+                ? state.editingPrediction.keyText
+                : regionById.get(state.currentKeyId).text;
             selectionStatus.textContent = `Đang chờ chọn VALUE cho “${keyText}”`;
             stepKey.classList.add("done");
             stepValue.classList.add("active");
@@ -1563,7 +1637,7 @@ def build_html(image_name, image_width, image_height, regions):
         recomputePreview();
         instruction.className = "instruction";
         instruction.textContent = (
-            `Đã loại “${pair.key.text}” → “${pair.value.text}”. `
+            `Đã xóa “${pair.key.text}” → “${pair.value.text}”. `
             + "Thao tác này không thay đổi rule hoặc các cặp khác."
         );
     }
@@ -1576,7 +1650,34 @@ def build_html(image_name, image_width, image_height, regions):
         state.suppressedPairIds.delete(pairId);
         recomputePreview();
         instruction.className = "instruction";
-        instruction.textContent = "Đã khôi phục cặp bị loại gần nhất.";
+        instruction.textContent = "Đã khôi phục cặp bị xóa gần nhất.";
+    }
+
+    function editPrediction(pair) {
+        const pairId = pairInstanceId(pair);
+        closePredictionPopover();
+        state.editingPrediction = {
+            pairId,
+            keyText: pair.key.text,
+        };
+        state.suppressedPairIds.add(pairId);
+        state.hideUnusedRegions = false;
+        state.currentKeyId = pair.key.regionIds[0];
+        recomputePreview();
+        instruction.className = "instruction wait-value";
+        instruction.textContent = (
+            `Đang sửa cặp có key “${pair.key.text}”. `
+            + "Hãy bấm bbox chứa value đúng; bấm “Hủy key đang chọn” "
+            + "để khôi phục cặp cũ."
+        );
+    }
+
+    function finishEditingPrediction() {
+        if (!state.editingPrediction) {
+            return;
+        }
+        state.suppressedPairIds.delete(state.editingPrediction.pairId);
+        state.editingPrediction = null;
     }
 
     function openInlineEditor(regionId) {
@@ -1629,6 +1730,7 @@ def build_html(image_name, image_width, image_height, regions):
             valueText,
             inlineSeparator.value.trim(),
         );
+        finishEditingPrediction();
         state.examples.push(example);
         state.currentKeyId = null;
         state.inlineRegionId = null;
@@ -1655,6 +1757,14 @@ def build_html(image_name, image_width, image_height, regions):
             return;
         }
         const region = regionById.get(regionId);
+        if (!state.currentKeyId) {
+            const prediction = predictionForRegion(regionId);
+            if (prediction) {
+                openPredictionPopover(prediction);
+                return;
+            }
+        }
+        closePredictionPopover();
         const regionWasUsed = state.examples.some(example => (
             example.key.regionIds.includes(regionId)
             || example.value.regionIds.includes(regionId)
@@ -1701,6 +1811,7 @@ def build_html(image_name, image_width, image_height, regions):
             );
             return;
         }
+        finishEditingPrediction();
         state.examples.push(example);
         state.currentKeyId = null;
         recomputePreview();
@@ -1715,12 +1826,14 @@ def build_html(image_name, image_width, image_height, regions):
     }
 
     function cancelCurrentKey() {
+        const wasEditingPrediction = Boolean(state.editingPrediction);
+        finishEditingPrediction();
         state.currentKeyId = null;
         instruction.className = "instruction";
-        instruction.textContent = "Đã hủy key. Hãy bấm vào bbox chứa key muốn chọn.";
-        refreshBoxStyles();
-        updateSteps();
-        updateButtons();
+        instruction.textContent = wasEditingPrediction
+            ? "Đã hủy sửa và khôi phục cặp preview cũ."
+            : "Đã hủy key. Hãy bấm vào bbox chứa key muốn chọn.";
+        recomputePreview();
     }
 
     function undoLastExample() {
@@ -1749,6 +1862,9 @@ def build_html(image_name, image_width, image_height, regions):
         state.suppressedPairIds = new Set();
         state.suppressionHistory = [];
         state.hideUnusedRegions = false;
+        state.popoverPair = null;
+        state.editingPrediction = null;
+        pairPopover.hidden = true;
         resultSection.hidden = true;
         instruction.className = "instruction";
         instruction.textContent = (
@@ -1828,6 +1944,26 @@ def build_html(image_name, image_width, image_height, regions):
     resetAllButton.addEventListener("click", resetAll);
     confirmResultButton.addEventListener("click", confirmResults);
     toggleUnusedRegionsButton.addEventListener("click", toggleUnusedRegions);
+    pairPopover.addEventListener("click", event => event.stopPropagation());
+    editPredictionButton.addEventListener("click", () => {
+        if (state.popoverPair) {
+            editPrediction(state.popoverPair);
+        }
+    });
+    deletePredictionButton.addEventListener("click", () => {
+        if (!state.popoverPair) {
+            return;
+        }
+        const pair = state.popoverPair;
+        closePredictionPopover();
+        suppressPrediction(pair);
+    });
+    document.addEventListener("click", closePredictionPopover);
+    document.addEventListener("keydown", event => {
+        if (event.key === "Escape" && !pairPopover.hidden) {
+            closePredictionPopover();
+        }
+    });
     inlineSeparator.addEventListener("change", updateInlineFieldsFromSeparator);
     cancelInlineButton.addEventListener("click", cancelInlineSelection);
     confirmInlineButton.addEventListener("click", confirmInlineSelection);
