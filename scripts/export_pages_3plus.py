@@ -83,6 +83,7 @@ def find_first_data_page(renderer, pdf_file, output_directory):
     page_2_image = output_directory / "page_2_classification.png"
     command = [
         renderer,
+        "-q",
         "-dSAFER",
         "-dBATCH",
         "-dNOPAUSE",

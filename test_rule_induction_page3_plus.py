@@ -1,9 +1,9 @@
 # Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3.
-# Chức năng: render page 3, cache detector và hiển thị confidence của recognition.
-# Luồng xử lý: folder PDF → chọn page 3 → render → detector cache → OCR → HTML.
+# Chức năng: cache vị trí page 3/detector và hiển thị confidence của recognition.
+# Luồng xử lý: folder PDF → page cache → render → detector cache → OCR → HTML.
 # Cấu hình/parameter: nhận folder chứa PDF; render page ở 400 DPI.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
-# Input/output: đọc PDF; ghi ảnh page 3, detector cache và rule_induction.html.
+# Input/output: đọc PDF; ghi ảnh, hai loại cache và rule_induction.html.
 # Contract: page 3 là page dữ liệu đầu tiên sau page 1 và page ý kiến tùy chọn.
 
 import argparse
@@ -13,6 +13,7 @@ import shutil
 import subprocess
 from html import escape
 from pathlib import Path
+from time import perf_counter
 
 import cv2
 
@@ -21,6 +22,7 @@ from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
 
 
 DETECTOR_CACHE_VERSION = "PP-OCRv6_small_det-v1"
+PAGE_SELECTION_CACHE_VERSION = "comment-page-structure-v1"
 
 
 class CachedTextDetector:
@@ -70,6 +72,51 @@ class CachedTextDetector:
             encoding="utf-8",
         )
         return [{"dt_polys": polygons}]
+
+
+def _load_page_selection_cache(cache_path):
+    """Đọc cache vị trí page 3 hoặc trả cache rỗng khi chưa có."""
+    if not cache_path.is_file():
+        return {}
+    return json.loads(cache_path.read_text(encoding="utf-8"))
+
+
+def _find_first_data_page_with_cache(
+    renderer,
+    pdf_file,
+    output_directory,
+    cache,
+    cache_path,
+):
+    """Lấy page 3 từ cache hoặc phân loại lại khi PDF đã thay đổi."""
+    file_status = pdf_file.stat()
+    fingerprint = {
+        "version": PAGE_SELECTION_CACHE_VERSION,
+        "size": file_status.st_size,
+        "modified_ns": file_status.st_mtime_ns,
+    }
+    cached_entry = cache.get(pdf_file.name)
+    if cached_entry and cached_entry["fingerprint"] == fingerprint:
+        return cached_entry["physical_page"], True
+
+    physical_page = find_first_data_page(
+        renderer,
+        pdf_file,
+        output_directory,
+    )
+    cache[pdf_file.name] = {
+        "fingerprint": fingerprint,
+        "physical_page": physical_page,
+    }
+    cache_path.write_text(
+        json.dumps(
+            cache,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return physical_page, False
 
 
 def parse_arguments():
@@ -2209,6 +2256,7 @@ def _render_page(renderer, pdf_path, page_number, output_path):
     """Render đúng một page vật lý của PDF thành ảnh PNG."""
     command = [
         renderer,
+        "-q",
         "-dSAFER",
         "-dBATCH",
         "-dNOPAUSE",
@@ -2266,23 +2314,41 @@ def main():
 
     output_directory = Path("./output/rule_induction") / pdf_directory.name
     output_directory.mkdir(parents=True, exist_ok=True)
+    page_selection_cache_path = output_directory / "page_selection_cache.json"
+    page_selection_cache = _load_page_selection_cache(
+        page_selection_cache_path
+    )
     extractor = Page3PlusKeyValueExtractor()
     extractor.text_detector = CachedTextDetector(
         extractor.text_detector,
         output_directory / "detector_cache",
     )
     pages = []
+    batch_started = perf_counter()
+    total_files = len(pdf_files)
 
-    for pdf_file in pdf_files:
-        physical_page = find_first_data_page(
+    for file_index, pdf_file in enumerate(pdf_files, start=1):
+        item_started = perf_counter()
+        progress = f"[{file_index}/{total_files}] {pdf_file.name}"
+        print(f"{progress} | Đang xác định page 3...", flush=True)
+        physical_page, page_cache_hit = _find_first_data_page_with_cache(
             renderer,
             pdf_file,
             output_directory,
+            page_selection_cache,
+            page_selection_cache_path,
         )
+        page_source = "cache page" if page_cache_hit else "phân loại mới"
         if physical_page is None:
-            print(f"Bỏ qua {pdf_file.name}: không có page 3.")
+            print(f"{progress} | Bỏ qua: không có page 3 ({page_source}).")
             continue
+
         output_image_path = output_directory / f"{pdf_file.stem}_page_3.png"
+        print(
+            f"{progress} | Đang render page vật lý {physical_page} "
+            f"({page_source})...",
+            flush=True,
+        )
         _render_page(
             renderer,
             pdf_file,
@@ -2293,6 +2359,7 @@ def main():
         if image is None:
             raise FileNotFoundError(f"Không đọc được ảnh: {output_image_path}")
 
+        print(f"{progress} | Đang chạy detector/recognition...", flush=True)
         image_height, image_width = image.shape[:2]
         pages.append(
             {
@@ -2310,8 +2377,9 @@ def main():
             else "detector mới"
         )
         print(
-            f"Đã OCR {pdf_file.name}: "
-            f"page vật lý {physical_page}, {detector_source}"
+            f"{progress} | Hoàn tất trong "
+            f"{perf_counter() - item_started:.1f}s: page vật lý "
+            f"{physical_page}, {page_source}, {detector_source}"
         )
 
     if not pages:
@@ -2321,6 +2389,10 @@ def main():
     html_path.write_text(
         build_html(pages),
         encoding="utf-8",
+    )
+    print(
+        f"Hoàn tất {len(pages)}/{total_files} PDF trong "
+        f"{perf_counter() - batch_started:.1f}s."
     )
     print(f"HTML Rule Induction: {html_path}")
 
