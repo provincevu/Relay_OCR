@@ -1,5 +1,5 @@
 # Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3.
-# Chức năng: render page 3 từ PDF, cache detector và tạo preview Rule Induction.
+# Chức năng: render page 3, cache detector và hiển thị confidence của recognition.
 # Luồng xử lý: folder PDF → chọn page 3 → render → detector cache → OCR → HTML.
 # Cấu hình/parameter: nhận folder chứa PDF; render page ở 400 DPI.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
@@ -233,6 +233,16 @@ def build_html(pages):
             justify-content: space-between;
             margin-bottom: 12px;
         }
+        .recognition-summary {
+            background: #eff6ff;
+            border: 1px solid #93c5fd;
+            border-radius: 8px;
+            color: #1e3a8a;
+            flex-basis: 100%;
+            font-size: 14px;
+            line-height: 1.5;
+            padding: 9px 11px;
+        }
         .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; }
         .legend-item { align-items: center; display: flex; gap: 5px; }
         .swatch { border: 2px solid; height: 13px; width: 22px; }
@@ -281,9 +291,27 @@ def build_html(pages):
             cursor: pointer;
             min-height: 5px;
             min-width: 5px;
+            overflow: visible;
+            padding: 0;
             position: absolute;
             transition: background 100ms, border-color 100ms, box-shadow 100ms;
         }
+        .recognition-score {
+            background: #0f172a;
+            border-radius: 4px;
+            color: white;
+            font-size: 11px;
+            font-weight: 700;
+            left: -2px;
+            line-height: 1;
+            padding: 3px 4px;
+            pointer-events: none;
+            position: absolute;
+            top: -20px;
+            white-space: nowrap;
+        }
+        .recognition-score.medium { background: #b45309; }
+        .recognition-score.low { background: #b91c1c; }
         .ocr-box:hover {
             background: rgba(250, 204, 21, 0.22);
             border-color: #ca8a04;
@@ -584,6 +612,7 @@ def build_html(pages):
                 <button class="secondary" id="toggleUnusedRegions" disabled>
                     Ẩn bbox xám
                 </button>
+                <div class="recognition-summary" id="recognitionSummary"></div>
             </div>
             <div class="image-stage" id="imageStage">
                 <img id="pageImage" src="__IMAGE_NAME__" alt="Ảnh page cần phân tích">
@@ -640,7 +669,7 @@ def build_html(pages):
             <thead>
                 <tr>
                     <th>#</th><th>Key</th><th>Value</th>
-                    <th>Nguồn</th><th>Độ tin cậy</th>
+                    <th>Nguồn</th><th>Độ tin cậy rule</th>
                 </tr>
             </thead>
             <tbody id="resultBody"></tbody>
@@ -682,6 +711,7 @@ def build_html(pages):
     const previousPageButton = document.getElementById("previousPage");
     const nextPageButton = document.getElementById("nextPage");
     const pagePosition = document.getElementById("pagePosition");
+    const recognitionSummary = document.getElementById("recognitionSummary");
     const instruction = document.getElementById("instruction");
     const selectionStatus = document.getElementById("selectionStatus");
     const hoverInfo = document.getElementById("hoverInfo");
@@ -739,6 +769,45 @@ def build_html(pages):
             return ordered[middle];
         }
         return (ordered[middle - 1] + ordered[middle]) / 2;
+    }
+
+    function recognitionStatistics(sourceRegions) {
+        const scores = sourceRegions.map(region => region.score);
+        if (scores.length === 0) {
+            return null;
+        }
+        return {
+            count: scores.length,
+            average: scores.reduce((sum, score) => sum + score, 0)
+                / scores.length,
+            median: median(scores),
+            minimum: Math.min(...scores),
+            belowEighty: scores.filter(score => score < 0.80).length,
+        };
+    }
+
+    function formatRecognitionStatistics(label, statistics) {
+        if (!statistics) {
+            return `${label}: không có vùng text`;
+        }
+        return (
+            `${label}: ${statistics.count} vùng · `
+            + `trung bình ${(statistics.average * 100).toFixed(1)}% · `
+            + `trung vị ${(statistics.median * 100).toFixed(1)}% · `
+            + `thấp nhất ${(statistics.minimum * 100).toFixed(1)}% · `
+            + `dưới 80%: ${statistics.belowEighty}/${statistics.count}`
+        );
+    }
+
+    function updateRecognitionSummary() {
+        const pageStatistics = recognitionStatistics(regions);
+        const allRegions = pages.flatMap(page => page.regions);
+        const overallStatistics = recognitionStatistics(allRegions);
+        recognitionSummary.textContent = [
+            "Recognition confidence (rec_score): đỏ <75%, cam <90%, đen ≥90%",
+            formatRecognitionStatistics("Phiếu hiện tại", pageStatistics),
+            formatRecognitionStatistics("Toàn bộ folder", overallStatistics),
+        ].join(" | ");
     }
 
     function maxDeviation(values, expected) {
@@ -1341,7 +1410,18 @@ def build_html(pages):
             box.style.zIndex = String(
                 Math.round(1000000 / Math.max(width * height, 1))
             );
-            box.title = `${region.text} (${region.score.toFixed(4)})`;
+            box.title = (
+                `${region.text} · rec_score ${region.score.toFixed(4)}`
+            );
+            const recognitionScore = document.createElement("span");
+            recognitionScore.className = "recognition-score";
+            if (region.score < 0.75) {
+                recognitionScore.classList.add("low");
+            } else if (region.score < 0.90) {
+                recognitionScore.classList.add("medium");
+            }
+            recognitionScore.textContent = `${(region.score * 100).toFixed(1)}%`;
+            box.appendChild(recognitionScore);
             box.addEventListener("click", (event) => {
                 event.stopPropagation();
                 selectRegion(region.id);
@@ -1349,7 +1429,7 @@ def build_html(pages):
             box.addEventListener("mouseenter", () => {
                 hoverInfo.textContent = (
                     `OCR: “${region.text}” · `
-                    + `Độ tin cậy: ${region.score.toFixed(4)}`
+                    + `Recognition confidence: ${region.score.toFixed(4)}`
                 );
             });
             box.addEventListener("mouseleave", () => {
@@ -1532,7 +1612,9 @@ def build_html(pages):
         }
         if (includeScore) {
             const score = document.createElement("div");
-            score.textContent = `Độ tin cậy: ${(pair.score * 100).toFixed(1)}%`;
+            score.textContent = (
+                `Độ tin cậy rule: ${(pair.score * 100).toFixed(1)}%`
+            );
             item.appendChild(score);
         }
         if (state.suspectedHeaderIds.has(pairInstanceId(pair))) {
@@ -1990,6 +2072,7 @@ def build_html(pages):
         if (inlineDialog.open) {
             inlineDialog.close();
         }
+        updateRecognitionSummary();
         resetAll();
         renderBoxes();
     }
