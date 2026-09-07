@@ -1,35 +1,38 @@
-# Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên một page.
-# Chức năng: OCR ảnh, chọn mẫu hai cột hoặc inline và xem preview tức thời.
-# Luồng xử lý: ảnh → OCR regions → chọn mẫu → tách/gộp bbox → suy luận rule.
-# Cấu hình/parameter: nhận một đường dẫn ảnh page 3+.
+# Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3.
+# Chức năng: render page 3 từ PDF, OCR và xem preview Rule Induction tức thời.
+# Luồng xử lý: folder PDF → chọn page 3 → render → OCR → một file HTML.
+# Cấu hình/parameter: nhận folder chứa PDF; render page ở 400 DPI.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
-# Input/output: đọc một ảnh; ghi ảnh nguồn và rule_induction.html.
-# Contract: rule và inline assignment chỉ áp dụng trong đúng page hiện tại.
+# Input/output: đọc các PDF; ghi ảnh page 3 và rule_induction.html.
+# Contract: page 3 là page dữ liệu đầu tiên sau page 1 và page ý kiến tùy chọn.
 
 import argparse
 import json
 import shutil
+import subprocess
 from html import escape
 from pathlib import Path
 
 import cv2
 
+from scripts.export_pages_3plus import DPI, find_first_data_page
 from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
 
 
 def parse_arguments():
-    """Đọc đường dẫn một ảnh cần tạo giao diện Rule Induction."""
+    """Đọc folder PDF cần tạo giao diện Rule Induction."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("image_path", type=Path)
+    parser.add_argument("pdf_directory", type=Path)
     return parser.parse_args()
 
 
-def build_html(image_name, image_width, image_height, regions):
-    """Tạo HTML tương tác để chọn mẫu và suy luận key-value."""
-    regions_json = json.dumps(regions, ensure_ascii=False).replace(
+def build_html(pages):
+    """Tạo một HTML Rule Induction cho toàn bộ page đã OCR."""
+    pages_json = json.dumps(pages, ensure_ascii=False).replace(
         "</",
         "<\\/",
     )
+    first_page = pages[0]
     template = r"""<!doctype html>
 <html lang="vi">
 <head>
@@ -72,6 +75,26 @@ def build_html(image_name, image_width, image_height, regions):
             position: sticky;
             top: 0;
             z-index: 50;
+        }
+        .page-navigation {
+            align-items: center;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 9px;
+            margin-bottom: 14px;
+        }
+        .page-navigation label { font-weight: 700; }
+        .page-navigation select {
+            border: 1px solid #94a3b8;
+            border-radius: 8px;
+            font: inherit;
+            min-width: 280px;
+            padding: 9px 10px;
+        }
+        .page-position {
+            color: #475569;
+            font-size: 14px;
+            margin-left: auto;
         }
         .steps { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
         .step {
@@ -403,6 +426,17 @@ def build_html(image_name, image_width, image_height, regions):
 </header>
 <main class="app">
     <section class="control-panel">
+        <div class="page-navigation">
+            <label for="pageSelect">Phiếu đang kiểm tra</label>
+            <button class="secondary" id="previousPage" type="button">
+                Phiếu trước
+            </button>
+            <select id="pageSelect"></select>
+            <button class="secondary" id="nextPage" type="button">
+                Phiếu sau
+            </button>
+            <span class="page-position" id="pagePosition"></span>
+        </div>
         <div class="steps">
             <span class="step active" id="stepKey">1. Chọn key</span>
             <span class="step" id="stepValue">2. Chọn value</span>
@@ -562,10 +596,12 @@ def build_html(image_name, image_width, image_height, regions):
 </main>
 
 <script>
-    const PAGE_WIDTH = __IMAGE_WIDTH__;
-    const PAGE_HEIGHT = __IMAGE_HEIGHT__;
-    const regions = __REGIONS_JSON__;
-    const regionById = new Map(regions.map(region => [region.id, region]));
+    const pages = __PAGES_JSON__;
+    let currentPageIndex = 0;
+    let PAGE_WIDTH = pages[0].width;
+    let PAGE_HEIGHT = pages[0].height;
+    let regions = pages[0].regions;
+    let regionById = new Map(regions.map(region => [region.id, region]));
 
     const state = {
         currentKeyId: null,
@@ -588,6 +624,11 @@ def build_html(image_name, image_width, image_height, regions):
     const boxLayer = document.getElementById("boxLayer");
     const linkLayer = document.getElementById("linkLayer");
     const logicalLayer = document.getElementById("logicalLayer");
+    const pageImage = document.getElementById("pageImage");
+    const pageSelect = document.getElementById("pageSelect");
+    const previousPageButton = document.getElementById("previousPage");
+    const nextPageButton = document.getElementById("nextPage");
+    const pagePosition = document.getElementById("pagePosition");
     const instruction = document.getElementById("instruction");
     const selectionStatus = document.getElementById("selectionStatus");
     const hoverInfo = document.getElementById("hoverInfo");
@@ -1873,6 +1914,33 @@ def build_html(image_name, image_width, image_height, regions):
         recomputePreview();
     }
 
+    function loadPage(pageIndex) {
+        currentPageIndex = pageIndex;
+        const page = pages[currentPageIndex];
+        PAGE_WIDTH = page.width;
+        PAGE_HEIGHT = page.height;
+        regions = page.regions;
+        regionById = new Map(regions.map(region => [region.id, region]));
+        pageImage.src = page.imageName;
+        pageImage.alt = `Page 3 của ${page.pdfName}`;
+        linkLayer.setAttribute(
+            "viewBox",
+            `0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}`,
+        );
+        pageSelect.value = String(currentPageIndex);
+        pagePosition.textContent = (
+            `${currentPageIndex + 1}/${pages.length} · `
+            + `page vật lý ${page.physicalPage}`
+        );
+        previousPageButton.disabled = currentPageIndex === 0;
+        nextPageButton.disabled = currentPageIndex === pages.length - 1;
+        if (inlineDialog.open) {
+            inlineDialog.close();
+        }
+        resetAll();
+        renderBoxes();
+    }
+
     function appendResultRow(index, pair, source, score) {
         const row = document.createElement("tr");
         const values = [
@@ -1936,6 +2004,15 @@ def build_html(image_name, image_width, image_height, regions):
     }
 
     cancelKeyButton.addEventListener("click", cancelCurrentKey);
+    pageSelect.addEventListener("change", () => {
+        loadPage(Number(pageSelect.value));
+    });
+    previousPageButton.addEventListener("click", () => {
+        loadPage(currentPageIndex - 1);
+    });
+    nextPageButton.addEventListener("click", () => {
+        loadPage(currentPageIndex + 1);
+    });
     inlineCurrentKeyButton.addEventListener("click", () => {
         openInlineEditor(state.currentKeyId);
     });
@@ -1972,30 +2049,49 @@ def build_html(image_name, image_width, image_height, regions):
         cancelInlineSelection();
     });
 
-    renderBoxes();
-    renderLinks();
-    renderLists();
-    renderRuleSummary();
-    updateSteps();
-    updateButtons();
+    pages.forEach((page, pageIndex) => {
+        const option = document.createElement("option");
+        option.value = String(pageIndex);
+        option.textContent = page.pdfName;
+        pageSelect.appendChild(option);
+    });
+    loadPage(0);
 </script>
 </body>
 </html>
 """
-    html = template.replace("__IMAGE_NAME__", escape(image_name))
-    html = html.replace("__IMAGE_WIDTH__", str(image_width))
-    html = html.replace("__IMAGE_HEIGHT__", str(image_height))
-    return html.replace("__REGIONS_JSON__", regions_json)
+    html = template.replace(
+        "__IMAGE_NAME__",
+        escape(first_page["imageName"]),
+    )
+    html = html.replace("__IMAGE_WIDTH__", str(first_page["width"]))
+    html = html.replace("__IMAGE_HEIGHT__", str(first_page["height"]))
+    return html.replace("__PAGES_JSON__", pages_json)
 
 
-def main():
-    """Chạy OCR cho một ảnh và tạo giao diện Rule Induction."""
-    arguments = parse_arguments()
-    image = cv2.imread(str(arguments.image_path))
-    if image is None:
-        raise FileNotFoundError(f"Không đọc được ảnh: {arguments.image_path}")
+def _render_page(renderer, pdf_path, page_number, output_path):
+    """Render đúng một page vật lý của PDF thành ảnh PNG."""
+    command = [
+        renderer,
+        "-dSAFER",
+        "-dBATCH",
+        "-dNOPAUSE",
+        "-sDEVICE=png16m",
+        f"-r{DPI}",
+        f"-dFirstPage={page_number}",
+        f"-dLastPage={page_number}",
+        f"-sOutputFile={output_path}",
+        str(pdf_path),
+    ]
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"Không thể render: {pdf_path.name}")
+    if not output_path.is_file():
+        raise FileNotFoundError(f"Không tạo được ảnh: {output_path}")
 
-    extractor = Page3PlusKeyValueExtractor()
+
+def _recognize_regions(extractor, image):
+    """OCR ảnh và chuẩn hóa các region dùng trong HTML."""
     text_regions, _ = extractor._recognize_text(image)
     text_regions.sort(
         key=lambda region: (
@@ -2003,7 +2099,7 @@ def main():
             region["center"][0],
         )
     )
-    regions = [
+    return [
         {
             "id": f"O{index}",
             "text": region["text"],
@@ -2013,22 +2109,72 @@ def main():
         for index, region in enumerate(text_regions, start=1)
     ]
 
-    output_directory = (
-        Path("./output/rule_induction") / arguments.image_path.parent.name
-    )
-    output_directory.mkdir(parents=True, exist_ok=True)
-    output_image_path = output_directory / arguments.image_path.name
-    shutil.copyfile(arguments.image_path, output_image_path)
 
-    image_height, image_width = image.shape[:2]
+def main():
+    """Render page 3 của các PDF và tạo một giao diện Rule Induction."""
+    arguments = parse_arguments()
+    pdf_directory = arguments.pdf_directory
+    if not pdf_directory.is_dir():
+        raise FileNotFoundError(f"Không tìm thấy folder PDF: {pdf_directory}")
+
+    renderer = shutil.which("gswin64c")
+    if not renderer:
+        raise FileNotFoundError("Không tìm thấy gswin64c trong PATH.")
+
+    pdf_files = sorted(
+        pdf_directory.glob("*.pdf"),
+        key=lambda path: path.name,
+    )
+    if not pdf_files:
+        raise FileNotFoundError(f"Không tìm thấy PDF trong: {pdf_directory}")
+
+    output_directory = Path("./output/rule_induction") / pdf_directory.name
+    output_directory.mkdir(parents=True, exist_ok=True)
+    extractor = Page3PlusKeyValueExtractor()
+    pages = []
+
+    for pdf_file in pdf_files:
+        physical_page = find_first_data_page(
+            renderer,
+            pdf_file,
+            output_directory,
+        )
+        if physical_page is None:
+            print(f"Bỏ qua {pdf_file.name}: không có page 3.")
+            continue
+        output_image_path = output_directory / f"{pdf_file.stem}_page_3.png"
+        _render_page(
+            renderer,
+            pdf_file,
+            physical_page,
+            output_image_path,
+        )
+        image = cv2.imread(str(output_image_path))
+        if image is None:
+            raise FileNotFoundError(f"Không đọc được ảnh: {output_image_path}")
+
+        image_height, image_width = image.shape[:2]
+        pages.append(
+            {
+                "pdfName": pdf_file.name,
+                "physicalPage": physical_page,
+                "imageName": output_image_path.name,
+                "width": image_width,
+                "height": image_height,
+                "regions": _recognize_regions(extractor, image),
+            }
+        )
+        print(
+            f"Đã OCR {pdf_file.name}: "
+            f"page vật lý {physical_page}"
+        )
+
+    if not pages:
+        raise FileNotFoundError("Không có PDF nào chứa page 3.")
+
     html_path = output_directory / "rule_induction.html"
     html_path.write_text(
-        build_html(
-            output_image_path.name,
-            image_width,
-            image_height,
-            regions,
-        ),
+        build_html(pages),
         encoding="utf-8",
     )
     print(f"HTML Rule Induction: {html_path}")

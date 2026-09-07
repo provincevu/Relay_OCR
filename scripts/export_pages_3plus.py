@@ -78,7 +78,7 @@ def _is_comment_page(image_path):
     return 20 <= dotted_group_count <= 35 and solid_group_count <= 5
 
 
-def _find_first_data_page(renderer, pdf_file, output_directory):
+def find_first_data_page(renderer, pdf_file, output_directory):
     """Trả số page bắt đầu sau khi phân loại page vật lý thứ hai."""
     page_2_image = output_directory / "page_2_classification.png"
     command = [
@@ -97,7 +97,7 @@ def _find_first_data_page(renderer, pdf_file, output_directory):
     if result.returncode != 0:
         raise RuntimeError(f"Không thể kiểm tra page 2: {pdf_file.name}")
     if not page_2_image.is_file():
-        return PAGE_2
+        return None
 
     is_comment_page = _is_comment_page(page_2_image)
     page_2_image.unlink()
@@ -129,11 +129,14 @@ def main():
     for pdf_file in pdf_files:
         document_output_directory = OUTPUT_DIRECTORY / pdf_file.stem
         document_output_directory.mkdir(parents=True, exist_ok=True)
-        first_data_page = _find_first_data_page(
+        first_data_page = find_first_data_page(
             renderer,
             pdf_file,
             document_output_directory,
         )
+        if first_data_page is None:
+            print(f"Bỏ qua {pdf_file.name}: không có page dữ liệu sau page 1.")
+            continue
         output_pattern = document_output_directory / "page_%03d.png"
         command = [
             renderer,
