@@ -1,12 +1,13 @@
 # Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3.
-# Chức năng: render page 3 từ PDF, OCR và xem preview Rule Induction tức thời.
-# Luồng xử lý: folder PDF → chọn page 3 → render → OCR → một file HTML.
+# Chức năng: render page 3 từ PDF, cache detector và tạo preview Rule Induction.
+# Luồng xử lý: folder PDF → chọn page 3 → render → detector cache → OCR → HTML.
 # Cấu hình/parameter: nhận folder chứa PDF; render page ở 400 DPI.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
-# Input/output: đọc các PDF; ghi ảnh page 3 và rule_induction.html.
+# Input/output: đọc PDF; ghi ảnh page 3, detector cache và rule_induction.html.
 # Contract: page 3 là page dữ liệu đầu tiên sau page 1 và page ý kiến tùy chọn.
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -17,6 +18,58 @@ import cv2
 
 from scripts.export_pages_3plus import DPI, find_first_data_page
 from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
+
+
+DETECTOR_CACHE_VERSION = "PP-OCRv6_small_det-v1"
+
+
+class CachedTextDetector:
+    """Lưu và tái sử dụng polygon do text detector trả về."""
+
+    def __init__(self, detector, cache_directory):
+        self.detector = detector
+        self.cache_directory = cache_directory
+        self.cache_directory.mkdir(parents=True, exist_ok=True)
+        self.last_cache_hit = False
+
+    def predict(self, input, **parameters):
+        """Trả kết quả detector từ cache hoặc chạy detector khi chưa có."""
+        cache_key = hashlib.sha256()
+        cache_key.update(DETECTOR_CACHE_VERSION.encode("utf-8"))
+        cache_key.update(str(input.shape).encode("utf-8"))
+        cache_key.update(str(input.dtype).encode("utf-8"))
+        cache_key.update(input.tobytes())
+        cache_key.update(
+            json.dumps(
+                parameters,
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        cache_path = self.cache_directory / f"{cache_key.hexdigest()}.json"
+
+        if cache_path.is_file():
+            self.last_cache_hit = True
+            polygons = json.loads(cache_path.read_text(encoding="utf-8"))
+            return [{"dt_polys": polygons}]
+
+        self.last_cache_hit = False
+        detection_results = self.detector.predict(
+            input=input,
+            **parameters,
+        )
+        polygons = [
+            [
+                [float(x_coordinate), float(y_coordinate)]
+                for x_coordinate, y_coordinate in polygon
+            ]
+            for detection_result in detection_results
+            for polygon in detection_result["dt_polys"]
+        ]
+        cache_path.write_text(
+            json.dumps(polygons),
+            encoding="utf-8",
+        )
+        return [{"dt_polys": polygons}]
 
 
 def parse_arguments():
@@ -2131,6 +2184,10 @@ def main():
     output_directory = Path("./output/rule_induction") / pdf_directory.name
     output_directory.mkdir(parents=True, exist_ok=True)
     extractor = Page3PlusKeyValueExtractor()
+    extractor.text_detector = CachedTextDetector(
+        extractor.text_detector,
+        output_directory / "detector_cache",
+    )
     pages = []
 
     for pdf_file in pdf_files:
@@ -2164,9 +2221,14 @@ def main():
                 "regions": _recognize_regions(extractor, image),
             }
         )
+        detector_source = (
+            "cache detector"
+            if extractor.text_detector.last_cache_hit
+            else "detector mới"
+        )
         print(
             f"Đã OCR {pdf_file.name}: "
-            f"page vật lý {physical_page}"
+            f"page vật lý {physical_page}, {detector_source}"
         )
 
     if not pages:
