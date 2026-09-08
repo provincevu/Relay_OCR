@@ -285,9 +285,9 @@ def build_html(pages):
             border: 1px solid #93c5fd;
             border-radius: 8px;
             color: #1e3a8a;
-            flex-basis: 100%;
             font-size: 14px;
             line-height: 1.5;
+            margin-bottom: 10px;
             padding: 9px 11px;
         }
         .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 13px; }
@@ -338,27 +338,9 @@ def build_html(pages):
             cursor: pointer;
             min-height: 5px;
             min-width: 5px;
-            overflow: visible;
-            padding: 0;
             position: absolute;
             transition: background 100ms, border-color 100ms, box-shadow 100ms;
         }
-        .recognition-score {
-            background: #0f172a;
-            border-radius: 4px;
-            color: white;
-            font-size: 11px;
-            font-weight: 700;
-            left: -2px;
-            line-height: 1;
-            padding: 3px 4px;
-            pointer-events: none;
-            position: absolute;
-            top: -20px;
-            white-space: nowrap;
-        }
-        .recognition-score.medium { background: #b45309; }
-        .recognition-score.low { background: #b91c1c; }
         .ocr-box:hover {
             background: rgba(250, 204, 21, 0.22);
             border-color: #ca8a04;
@@ -478,6 +460,11 @@ def build_html(pages):
             font-weight: 700;
             margin-top: 6px;
         }
+        .recognition-confidence {
+            color: #1d4ed8;
+            font-size: 12px;
+            margin-top: 6px;
+        }
         .remove-pair {
             background: #fee2e2;
             color: #991b1b;
@@ -579,7 +566,7 @@ def build_html(pages):
             Bước 1: Hãy bấm vào bbox chứa key đầu tiên trên ảnh.
         </div>
         <div class="hover-info" id="hoverInfo">
-            Di chuột lên bbox để xem nội dung OCR và độ tin cậy.
+            Di chuột lên bbox để xem nội dung OCR.
         </div>
         <div class="actions">
             <button class="secondary" id="cancelKey" disabled>
@@ -659,7 +646,6 @@ def build_html(pages):
                 <button class="secondary" id="toggleUnusedRegions" disabled>
                     Ẩn bbox xám
                 </button>
-                <div class="recognition-summary" id="recognitionSummary"></div>
             </div>
             <div class="image-stage" id="imageStage">
                 <img id="pageImage" src="__IMAGE_NAME__" alt="Ảnh page cần phân tích">
@@ -696,6 +682,7 @@ def build_html(pages):
 
             <section class="card">
                 <h2>Preview suy luận (<span id="previewCount">0</span>)</h2>
+                <div class="recognition-summary" id="recognitionSummary"></div>
                 <div class="empty" id="previewEmpty">
                     Preview sẽ xuất hiện ngay sau khi bạn chọn xong cặp đầu tiên.
                 </div>
@@ -851,7 +838,7 @@ def build_html(pages):
         const allRegions = pages.flatMap(page => page.regions);
         const overallStatistics = recognitionStatistics(allRegions);
         recognitionSummary.textContent = [
-            "Recognition confidence (rec_score): đỏ <75%, cam <90%, đen ≥90%",
+            "Recognition confidence (rec_score)",
             formatRecognitionStatistics("Phiếu hiện tại", pageStatistics),
             formatRecognitionStatistics("Toàn bộ folder", overallStatistics),
         ].join(" | ");
@@ -1457,32 +1444,16 @@ def build_html(pages):
             box.style.zIndex = String(
                 Math.round(1000000 / Math.max(width * height, 1))
             );
-            box.title = (
-                `${region.text} · rec_score ${region.score.toFixed(4)}`
-            );
-            const recognitionScore = document.createElement("span");
-            recognitionScore.className = "recognition-score";
-            if (region.score < 0.75) {
-                recognitionScore.classList.add("low");
-            } else if (region.score < 0.90) {
-                recognitionScore.classList.add("medium");
-            }
-            recognitionScore.textContent = `${(region.score * 100).toFixed(1)}%`;
-            box.appendChild(recognitionScore);
+            box.title = region.text;
             box.addEventListener("click", (event) => {
                 event.stopPropagation();
                 selectRegion(region.id);
             });
             box.addEventListener("mouseenter", () => {
-                hoverInfo.textContent = (
-                    `OCR: “${region.text}” · `
-                    + `Recognition confidence: ${region.score.toFixed(4)}`
-                );
+                hoverInfo.textContent = `OCR: “${region.text}”`;
             });
             box.addEventListener("mouseleave", () => {
-                hoverInfo.textContent = (
-                    "Di chuột lên bbox để xem nội dung OCR và độ tin cậy."
-                );
+                hoverInfo.textContent = "Di chuột lên bbox để xem nội dung OCR.";
             });
             boxLayer.appendChild(box);
         }
@@ -1663,6 +1634,14 @@ def build_html(pages):
                 `Độ tin cậy rule: ${(pair.score * 100).toFixed(1)}%`
             );
             item.appendChild(score);
+
+            const recognitionConfidence = document.createElement("div");
+            recognitionConfidence.className = "recognition-confidence";
+            recognitionConfidence.textContent = (
+                `Recognition — key: ${(pair.key.score * 100).toFixed(1)}% · `
+                + `value: ${(pair.value.score * 100).toFixed(1)}%`
+            );
+            item.appendChild(recognitionConfidence);
         }
         if (state.suspectedHeaderIds.has(pairInstanceId(pair))) {
             const status = document.createElement("div");
