@@ -6,8 +6,8 @@
 # Quan hệ: dùng cache của test_rule_induction_page3_plus.py và quy tắc
 # hiệu chỉnh OCR hiện có.
 # Input/output: đọc PDF/cache/ảnh 400 DPI; ghi dữ liệu GPT và ground truth JSON.
-# Contract: GPT trả key_region_ids/value_region_ids; mỗi ID tham chiếu
-# một polygon trong manifest.
+# Contract: GPT trả key_region_ids/value_region_ids; key_text/value_text là tùy
+# chọn khi key và value cần tách từ cùng một polygon.
 
 import argparse
 import hashlib
@@ -253,6 +253,8 @@ def prepare():
         "gpt_output_contract": {
             "key_region_ids": ["R001"],
             "value_region_ids": ["R002"],
+            "key_text": "Nội dung key tùy chọn",
+            "value_text": "Nội dung value tùy chọn",
         },
         "pages": pages,
     }
@@ -304,10 +306,16 @@ def build(gpt_result_path):
             ]
             records.append(
                 {
-                    "key": " ".join(region["text"] for region in key_regions),
-                    "value": " ".join(
-                        region["text"]
-                        for region in value_regions
+                    "key": pair.get(
+                        "key_text",
+                        " ".join(region["text"] for region in key_regions),
+                    ),
+                    "value": pair.get(
+                        "value_text",
+                        " ".join(
+                            region["text"]
+                            for region in value_regions
+                        ),
                     ),
                     "key_region_ids": key_region_ids,
                     "value_region_ids": value_region_ids,
