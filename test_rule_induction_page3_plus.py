@@ -838,7 +838,7 @@ def build_html(pages):
         const allRegions = pages.flatMap(page => page.regions);
         const overallStatistics = recognitionStatistics(allRegions);
         recognitionSummary.textContent = [
-            "Recognition confidence (rec_score)",
+            "Confidence PP-OCR trước hiệu chỉnh VietOCR (rec_score)",
             formatRecognitionStatistics("Phiếu hiện tại", pageStatistics),
             formatRecognitionStatistics("Toàn bộ folder", overallStatistics),
         ].join(" | ");
@@ -1638,7 +1638,7 @@ def build_html(pages):
             const recognitionConfidence = document.createElement("div");
             recognitionConfidence.className = "recognition-confidence";
             recognitionConfidence.textContent = (
-                `Recognition — key: ${(pair.key.score * 100).toFixed(1)}% · `
+                `PP-OCR trước sửa — key: ${(pair.key.score * 100).toFixed(1)}% · `
                 + `value: ${(pair.value.score * 100).toFixed(1)}%`
             );
             item.appendChild(recognitionConfidence);
@@ -2255,14 +2255,21 @@ def _render_page(renderer, pdf_path, page_number, output_path):
 
 def _recognize_regions(extractor, image):
     """OCR ảnh và chuẩn hóa các region dùng trong HTML."""
-    text_regions, _ = extractor._recognize_text(image)
+    text_regions, timings = extractor._recognize_text(image)
+    for stage_name, seconds in timings.items():
+        stage_label = {
+            "Text detection": "Detector/cache",
+            "Text recognition": "Tổng recognition (PP-OCR + VietOCR + hiệu chỉnh)",
+        }.get(stage_name, stage_name)
+        print(f"    {stage_label}: {seconds:.3f}s", flush=True)
+    normalization_started = perf_counter()
     text_regions.sort(
         key=lambda region: (
             region["center"][1],
             region["center"][0],
         )
     )
-    return [
+    regions = [
         {
             "id": f"O{index}",
             "text": region["text"],
@@ -2271,6 +2278,12 @@ def _recognize_regions(extractor, image):
         }
         for index, region in enumerate(text_regions, start=1)
     ]
+    print(
+        f"    Chuẩn hóa {len(regions)} vùng OCR cho HTML: "
+        f"{perf_counter() - normalization_started:.3f}s",
+        flush=True,
+    )
+    return regions
 
 
 def main():
@@ -2297,10 +2310,16 @@ def main():
     page_selection_cache = _load_page_selection_cache(
         page_selection_cache_path
     )
+    print("Đang khởi tạo các model OCR...", flush=True)
+    initialization_started = perf_counter()
     extractor = Page3PlusKeyValueExtractor()
     extractor.text_detector = CachedTextDetector(
         extractor.text_detector,
         output_directory / "detector_cache",
+    )
+    print(
+        f"Khởi tạo model/cache: {perf_counter() - initialization_started:.3f}s",
+        flush=True,
     )
     pages = []
     batch_started = perf_counter()
@@ -2310,6 +2329,7 @@ def main():
         item_started = perf_counter()
         progress = f"[{file_index}/{total_files}] {pdf_file.name}"
         print(f"{progress} | Đang xác định page 3...", flush=True)
+        page_selection_started = perf_counter()
         physical_page, page_cache_hit = _find_first_data_page_with_cache(
             renderer,
             pdf_file,
@@ -2318,6 +2338,11 @@ def main():
             page_selection_cache_path,
         )
         page_source = "cache page" if page_cache_hit else "phân loại mới"
+        print(
+            f"{progress} | Xác định page 3 ({page_source}): "
+            f"{perf_counter() - page_selection_started:.3f}s",
+            flush=True,
+        )
         if physical_page is None:
             print(f"{progress} | Bỏ qua: không có page 3 ({page_source}).")
             continue
@@ -2328,15 +2353,25 @@ def main():
             f"({page_source})...",
             flush=True,
         )
+        render_started = perf_counter()
         _render_page(
             renderer,
             pdf_file,
             physical_page,
             output_image_path,
         )
+        print(
+            f"{progress} | Render: {perf_counter() - render_started:.3f}s",
+            flush=True,
+        )
+        image_read_started = perf_counter()
         image = cv2.imread(str(output_image_path))
         if image is None:
             raise FileNotFoundError(f"Không đọc được ảnh: {output_image_path}")
+        print(
+            f"{progress} | Đọc ảnh: {perf_counter() - image_read_started:.3f}s",
+            flush=True,
+        )
 
         print(f"{progress} | Đang chạy detector/recognition...", flush=True)
         image_height, image_width = image.shape[:2]
@@ -2358,16 +2393,22 @@ def main():
         print(
             f"{progress} | Hoàn tất trong "
             f"{perf_counter() - item_started:.1f}s: page vật lý "
-            f"{physical_page}, {page_source}, {detector_source}"
+            f"{physical_page}, {page_source}, {detector_source}",
+            flush=True,
         )
 
     if not pages:
         raise FileNotFoundError("Không có PDF nào chứa page 3.")
 
     html_path = output_directory / "rule_induction.html"
+    html_started = perf_counter()
     html_path.write_text(
         build_html(pages),
         encoding="utf-8",
+    )
+    print(
+        f"Tạo và lưu HTML: {perf_counter() - html_started:.3f}s",
+        flush=True,
     )
     print(
         f"Hoàn tất {len(pages)}/{total_files} PDF trong "

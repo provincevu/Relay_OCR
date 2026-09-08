@@ -1,14 +1,16 @@
 # Mục đích: thử nghiệm trích xuất cặp key-value từ ảnh page 3+.
-# Chức năng: OCR, ghép key-value, đo thời gian và tạo HTML trực quan.
+# Chức năng: OCR bằng PP-OCR, sửa token tiếng Việt bằng VietOCR và ghép key-value.
 # Luồng xử lý: ảnh → OCR → gom hàng → nhận diện schema/biểu thức/cột → HTML.
 # Cấu hình/parameter: nhận một image_path hoặc --all-page-001.
 # Quan hệ: script độc lập, không sử dụng SLANeXt hoặc Page1TableAnalyzer.
 # Input/output: đọc ảnh page 3+; ghi ảnh đánh dấu và một file HTML chung.
 # Contract: mỗi kết quả có key, value, bbox, metadata và phương pháp ghép.
+# Contract OCR: text đã hiệu chỉnh; score vẫn là rec_score gốc của PP-OCR.
 
 import argparse
 import json
 import re
+import unicodedata
 from html import escape
 from pathlib import Path
 from time import perf_counter
@@ -16,6 +18,13 @@ from time import perf_counter
 import cv2
 import numpy as np
 from paddleocr import TextDetection, TextRecognition
+
+from scr.services.page1.utils.text_comparison import (
+    TOKEN_PATTERN,
+    find_confusable_changes,
+    has_vietnamese_mark,
+)
+from scr.services.recognitor import Recognitor
 
 
 ASSIGNMENT_PATTERN = re.compile(
@@ -34,6 +43,60 @@ DOCUMENT_HEADER_PHRASES = (
     "số phiếu",
     "tờ số",
 )
+
+
+def _remove_vietnamese_marks(text):
+    """Bỏ dấu và chuyển đ thành d để đối chiếu phần ký tự gốc."""
+    return "".join(
+        character
+        for character in unicodedata.normalize("NFD", text.lower())
+        if not unicodedata.combining(character)
+    ).replace("đ", "d")
+
+
+def correct_text_with_vietocr(ppocr_text, vietocr_text):
+    """Sửa token có dấu theo VietOCR khi sai khác thuộc quy tắc cho phép."""
+    ppocr_matches = list(TOKEN_PATTERN.finditer(ppocr_text))
+    vietocr_tokens = TOKEN_PATTERN.findall(
+        unicodedata.normalize("NFC", vietocr_text),
+    )
+    # Không ghép theo vị trí khi hai model đã tách số token khác nhau.
+    if len(ppocr_matches) != len(vietocr_tokens):
+        return ppocr_text
+
+    corrected_parts = []
+    previous_end = 0
+    for match, vietocr_token in zip(ppocr_matches, vietocr_tokens):
+        ppocr_token = match.group(0)
+        corrected_token = ppocr_token
+        if ppocr_token != vietocr_token and has_vietnamese_mark(vietocr_token):
+            normalized_ppocr = _remove_vietnamese_marks(ppocr_token)
+            normalized_candidates = [""]
+            for character in vietocr_token:
+                normalized_character = _remove_vietnamese_marks(character)
+                candidates_with_character = [
+                    candidate + normalized_character
+                    for candidate in normalized_candidates
+                ]
+                # PP-OCR có thể bỏ cả ký tự mang dấu, ví dụ thực → thc.
+                if has_vietnamese_mark(character):
+                    candidates_with_character.extend(normalized_candidates)
+                normalized_candidates = candidates_with_character
+
+            if any(
+                normalized_ppocr == candidate
+                or find_confusable_changes(normalized_ppocr, candidate)
+                is not None
+                for candidate in normalized_candidates
+            ):
+                corrected_token = vietocr_token
+
+        corrected_parts.append(ppocr_text[previous_end:match.start()])
+        corrected_parts.append(corrected_token)
+        previous_end = match.end()
+
+    corrected_parts.append(ppocr_text[previous_end:])
+    return "".join(corrected_parts)
 
 
 def merge_boxes(regions):
@@ -240,7 +303,7 @@ class Page3PlusKeyValueExtractor:
     """Trích xuất cặp key-value trực tiếp từ các vùng OCR."""
 
     def __init__(self):
-        """Khởi tạo detector small và recognizer PP-OCRv6 medium."""
+        """Khởi tạo PP-OCRv6 small và VietOCR để hiệu chỉnh tiếng Việt."""
         self.text_detector = TextDetection(
             model_name="PP-OCRv6_small_det",
             device="cpu",
@@ -255,6 +318,7 @@ class Page3PlusKeyValueExtractor:
             enable_mkldnn=False,
             cpu_threads=4,
         )
+        self.vietocr_recognizer = Recognitor({})
 
     def _recognize_text(self, image):
         """Nhận diện nội dung và bbox của toàn bộ text trên ảnh."""
@@ -264,13 +328,15 @@ class Page3PlusKeyValueExtractor:
         timings = {}
         image_height, image_width = image.shape[:2]
         detection_started = perf_counter()
-        detection_results = self.text_detector.predict(
-            input=image,
-            limit_side_len=1600,
-            limit_type="max",
-            thresh=0.3,
-            box_thresh=0.6,
-            unclip_ratio=1.5,
+        detection_results = list(
+            self.text_detector.predict(
+                input=image,
+                limit_side_len=1600,
+                limit_type="max",
+                thresh=0.3,
+                box_thresh=0.6,
+                unclip_ratio=1.5,
+            )
         )
         timings["Text detection"] = perf_counter() - detection_started
 
@@ -296,6 +362,9 @@ class Page3PlusKeyValueExtractor:
                     }
                 )
         timings["Tạo text crop"] = perf_counter() - crop_started
+        timings["PP-OCR recognition"] = 0.0
+        timings["VietOCR recognition"] = 0.0
+        timings["Hiệu chỉnh text"] = 0.0
 
         if not text_crops:
             timings["Text recognition"] = 0.0
@@ -320,13 +389,25 @@ class Page3PlusKeyValueExtractor:
             )
         ]
         indexed_recognition_results.sort(key=lambda item: item[0])
+        timings["PP-OCR recognition"] = perf_counter() - recognition_started
 
-        for pending_region, (_, recognition_result) in zip(
+        for pending_region, (crop_index, recognition_result) in zip(
             pending_regions,
             indexed_recognition_results,
             strict=True,
         ):
-            text = recognition_result["rec_text"].strip()
+            ppocr_text = recognition_result["rec_text"].strip()
+            vietocr_started = perf_counter()
+            vietocr_text = self.vietocr_recognizer.recognize(
+                text_crops[crop_index],
+            ).strip()
+            timings["VietOCR recognition"] += perf_counter() - vietocr_started
+            correction_started = perf_counter()
+            text = correct_text_with_vietocr(
+                ppocr_text,
+                vietocr_text,
+            )
+            timings["Hiệu chỉnh text"] += perf_counter() - correction_started
             if not text:
                 continue
             text_regions.append(
@@ -899,7 +980,7 @@ def main():
         <table>
             <thead>
                 <tr>
-                    <th>#</th><th>OCR text</th><th>Score</th>
+                    <th>#</th><th>OCR text</th><th>Score PP-OCR trước sửa</th>
                     <th>Bbox</th><th>Trạng thái</th>
                 </tr>
             </thead>
