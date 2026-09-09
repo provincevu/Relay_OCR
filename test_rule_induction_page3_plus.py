@@ -2123,7 +2123,45 @@ def build_html(pages):
         document.getElementById("resultBody").appendChild(row);
     }
 
-    function confirmResults() {
+    async function confirmResults() {
+        const page = pages[currentPageIndex];
+        const confirmedResult = {
+            pdf_name: page.pdfName,
+            physical_page: page.physicalPage,
+            image_name: page.imageName,
+            confirmed_at: new Date().toISOString(),
+            pairs: [
+                ...state.examples.map(pair => ({
+                    key: pair.key.text,
+                    value: pair.value.text,
+                    source: "người dùng chọn",
+                    rule_score: null,
+                    key_ocr_score: pair.key.score,
+                    value_ocr_score: pair.value.score,
+                    key_box: [...pair.key.box],
+                    value_box: [...pair.value.box],
+                })),
+                ...state.predictions.map(pair => ({
+                    key: pair.key.text,
+                    value: pair.value.text,
+                    source: "suy luận",
+                    rule_score: pair.score,
+                    key_ocr_score: pair.key.score,
+                    value_ocr_score: pair.value.score,
+                    key_box: [...pair.key.box],
+                    value_box: [...pair.value.box],
+                })),
+            ],
+        };
+        const response = await fetch("/confirm", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(confirmedResult),
+        });
+        if (!response.ok) {
+            throw new Error("Không lưu được kết quả đã xác nhận.");
+        }
+
         state.confirmed = true;
         state.currentKeyId = null;
         const resultBody = document.getElementById("resultBody");
@@ -2150,7 +2188,7 @@ def build_html(pages):
         instruction.className = "instruction confirmed";
         instruction.textContent = (
             "Đã xác nhận kết quả. Bảng key-value đã được hiển thị phía dưới ảnh; "
-            + "dữ liệu chưa được lưu ra file."
+            + "dữ liệu đã được lưu ra file."
         );
         refreshBoxStyles();
         renderLists();
