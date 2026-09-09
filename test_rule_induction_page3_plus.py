@@ -1,9 +1,9 @@
 # Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3.
-# Chức năng: cache vị trí page 3/detector và hiển thị confidence của recognition.
-# Luồng xử lý: folder PDF → page cache → render → detector cache → OCR → HTML.
+# Chức năng: cache vị trí page 3, detector, recognition và hiển thị confidence.
+# Luồng xử lý: folder PDF → page cache → render → recognition cache/OCR → HTML.
 # Cấu hình/parameter: nhận folder chứa PDF; render page ở 400 DPI.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
-# Input/output: đọc PDF; ghi ảnh, hai loại cache và rule_induction.html.
+# Input/output: đọc PDF; ghi ảnh, các cache và rule_induction.html.
 # Contract: page 3 là page dữ liệu đầu tiên sau page 1 và page ý kiến tùy chọn.
 
 import argparse
@@ -22,6 +22,7 @@ from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
 
 
 DETECTOR_CACHE_VERSION = "PP-OCRv6_small_det-v1"
+RECOGNITION_CACHE_VERSION = "page3-plus-recognition-v1"
 PAGE_SELECTION_CACHE_VERSION = "comment-page-structure-v1"
 
 
@@ -2324,6 +2325,35 @@ def _recognize_regions(extractor, image):
     return regions
 
 
+def _recognize_regions_with_cache(extractor, image, cache_directory):
+    """Trả region recognition từ cache hoặc chạy OCR khi chưa có."""
+    cache_directory.mkdir(parents=True, exist_ok=True)
+    cache_key = hashlib.sha256()
+    cache_key.update(RECOGNITION_CACHE_VERSION.encode("utf-8"))
+    cache_key.update(str(image.shape).encode("utf-8"))
+    cache_key.update(str(image.dtype).encode("utf-8"))
+    cache_key.update(image.tobytes())
+    cache_path = cache_directory / f"{cache_key.hexdigest()}.json"
+
+    if cache_path.is_file():
+        regions = json.loads(cache_path.read_text(encoding="utf-8"))
+        print(
+            f"    Cache recognition: hit ({len(regions)} vùng OCR)",
+            flush=True,
+        )
+        return regions, True
+
+    regions = _recognize_regions(extractor, image)
+    cache_path.write_text(
+        json.dumps(
+            regions,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return regions, False
+
+
 def main():
     """Render page 3 của các PDF và tạo một giao diện Rule Induction."""
     arguments = parse_arguments()
@@ -2411,8 +2441,15 @@ def main():
             flush=True,
         )
 
-        print(f"{progress} | Đang chạy detector/recognition...", flush=True)
+        print(f"{progress} | Đang đọc cache/chạy recognition...", flush=True)
         image_height, image_width = image.shape[:2]
+        recognized_regions, recognition_cache_hit = (
+            _recognize_regions_with_cache(
+                extractor,
+                image,
+                output_directory / "recognition_cache",
+            )
+        )
         pages.append(
             {
                 "pdfName": pdf_file.name,
@@ -2420,18 +2457,22 @@ def main():
                 "imageName": output_image_path.name,
                 "width": image_width,
                 "height": image_height,
-                "regions": _recognize_regions(extractor, image),
+                "regions": recognized_regions,
             }
         )
-        detector_source = (
-            "cache detector"
-            if extractor.text_detector.last_cache_hit
-            else "detector mới"
-        )
+        if recognition_cache_hit:
+            recognition_source = "cache recognition"
+        else:
+            detector_source = (
+                "cache detector"
+                if extractor.text_detector.last_cache_hit
+                else "detector mới"
+            )
+            recognition_source = f"recognition mới, {detector_source}"
         print(
             f"{progress} | Hoàn tất trong "
             f"{perf_counter() - item_started:.1f}s: page vật lý "
-            f"{physical_page}, {page_source}, {detector_source}",
+            f"{physical_page}, {page_source}, {recognition_source}",
             flush=True,
         )
 
