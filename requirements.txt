@@ -7,3 +7,4 @@ torch==2.13.0
 setuptools<82
 torchvision==0.28.0
 openai>=1.0.0
+transformers==4.57.1
