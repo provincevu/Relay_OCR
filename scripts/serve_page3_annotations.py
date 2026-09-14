@@ -1,0 +1,130 @@
+# Mục đích: phục vụ giao diện và lưu dataset annotation page 3.
+# Chức năng: đọc/lưu phiếu đã xác nhận, giữ snapshot OCR và nhóm quan hệ.
+# Luồng xử lý: GET giao diện/dataset → POST một phiếu → ghi annotations.json.
+# Cấu hình/parameter: thư mục output và --port, mặc định 8001, chỉ localhost.
+# Quan hệ: phục vụ output của annotate_page3.py cho train_page3_text_layout.py.
+# Input/output: JSON phiên bản 1, pages ánh xạ image_name → phiếu đã xác nhận.
+# Contract: không lưu draft; chỉ ghi snapshot OCR khớp manifest và relation hợp lệ.
+
+import argparse
+import json
+from datetime import datetime, timezone
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Lock
+
+
+LABELS = {"CODE", "KEY", "VALUE", "HEADER", "OTHER", "UNLABELED"}
+
+
+class AnnotationRequestHandler(SimpleHTTPRequestHandler):
+    """Lưu đồng bộ annotation và relation của từng phiếu."""
+
+    def send_json(self, value):
+        """Trả JSON UTF-8 và không dùng cache trình duyệt cho annotation."""
+        body = json.dumps(value, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        """Đọc dataset đã lưu hoặc phục vụ ảnh và giao diện."""
+        if self.path == "/api/annotations":
+            with self.server.annotation_lock:
+                dataset = {"schema_version": 1, "pages": {}}
+                if self.server.dataset_path.is_file():
+                    dataset = json.loads(
+                        self.server.dataset_path.read_text(encoding="utf-8"),
+                    )
+            self.send_json(dataset)
+            return
+        if self.path == "/":
+            self.path = "/annotate_page3.html"
+        super().do_GET()
+
+    def do_POST(self):
+        """Chỉ xác nhận sau khi đã lưu phiếu với các ID và nhãn nhất quán."""
+        if self.path != "/api/annotations":
+            self.send_error(404)
+            return
+        record = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        page = self.server.pages[record["image_name"]]
+        if record["ocr_fingerprint"] != page["ocrFingerprint"]:
+            raise ValueError("Snapshot OCR không khớp manifest của server.")
+        annotations = record["annotations"]
+        region_ids = {region["id"] for region in page["regions"]}
+        if set(annotations) != region_ids:
+            raise ValueError("Annotation phải có đủ và đúng ID region của phiếu.")
+        for roles in annotations.values():
+            if not roles or not set(roles) <= LABELS:
+                raise ValueError("Annotation chứa nhãn không hợp lệ.")
+            if ("UNLABELED" in roles or "OTHER" in roles) and len(roles) != 1:
+                raise ValueError("OTHER và UNLABELED phải đứng riêng.")
+        linked = {role: set() for role in ["CODE", "KEY", "VALUE"]}
+        for relation in record["relations"]:
+            for role in linked:
+                ids = relation[f"{role.lower()}_region_ids"]
+                if role == "CODE" and ids is None:
+                    continue
+                if not ids or any(role not in annotations[region_id] for region_id in ids):
+                    raise ValueError("Relation chứa ID không có nhãn tương ứng.")
+                linked[role].update(ids)
+        for role, ids in linked.items():
+            if ids != {region_id for region_id, roles in annotations.items() if role in roles}:
+                raise ValueError("CODE/KEY/VALUE phải thuộc một nhóm quan hệ.")
+        saved_record = {
+            "pdf_name": page["pdfName"],
+            "physical_page": page["physicalPage"],
+            "image_name": page["imageName"],
+            "image_width": page["width"],
+            "image_height": page["height"],
+            "ocr_fingerprint": page["ocrFingerprint"],
+            "regions": page["regions"],
+            "annotations": annotations,
+            "relations": record["relations"],
+            "confirmed_at": datetime.now(timezone.utc).isoformat(),
+        }
+        with self.server.annotation_lock:
+            dataset = {"schema_version": 1, "pages": {}}
+            if self.server.dataset_path.is_file():
+                dataset = json.loads(
+                    self.server.dataset_path.read_text(encoding="utf-8"),
+                )
+            dataset["pages"][page["imageName"]] = saved_record
+            temporary_path = self.server.dataset_path.with_suffix(".json.tmp")
+            temporary_path.write_text(
+                json.dumps(dataset, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            temporary_path.replace(self.server.dataset_path)
+        self.send_json(saved_record)
+
+
+def main():
+    """Chạy server annotation cục bộ, không khởi tạo OCR hoặc model layout."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("output_directory", type=Path)
+    parser.add_argument("--port", type=int, default=8001)
+    arguments = parser.parse_args()
+    directory = arguments.output_directory.resolve()
+    manifest = json.loads(
+        (directory / "annotation_manifest.json").read_text(encoding="utf-8"),
+    )
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", arguments.port),
+        partial(AnnotationRequestHandler, directory=str(directory)),
+    )
+    server.annotation_lock = Lock()
+    server.dataset_path = directory / "annotations.json"
+    server.pages = {page["imageName"]: page for page in manifest["pages"]}
+    print(f"Giao diện: http://127.0.0.1:{arguments.port}/", flush=True)
+    print(f"Dataset: {server.dataset_path}", flush=True)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
