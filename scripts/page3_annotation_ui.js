@@ -7,7 +7,7 @@ const original = {
 const annotation = {
     selected: new Set(), groups: [], labels: {}, history: [],
     mode: "sample", sessions: new Map(), activePage: -1,
-    saved: {}, editing: null, dirty: false, frozenPairs: [],
+    saved: {}, editing: null, dirty: false, frozenPairs: [], lockedRows: [],
 };
 const annotationStyle = document.createElement("style");
 annotationStyle.textContent = `
@@ -21,6 +21,18 @@ annotationStyle.textContent = `
     .ocr-box.annotation-header{border-color:#a16207;background:#a162072b}
     .ocr-box.annotation-unlabeled{border-color:#475569;border-style:dashed;background:#47556945}
     .ocr-box.annotation-other{border-color:#94a3b8;background:#94a3b81a}
+    .ocr-box.annotation-frozen-key,.ocr-box.annotation-frozen-value{
+        border-color:#64748b;background:#64748b2b;border-style:dotted;opacity:.8}
+    .ocr-box.annotation-locked-row{box-shadow:inset 0 0 0 2px #94a3b8;background:#94a3b81a}
+    .logical-box.frozen-key,.logical-box.frozen-value,.logical-box.frozen-code{
+        border-color:#64748b;border-style:dotted;opacity:.75}
+    .logical-box.frozen-key span,.logical-box.frozen-value span,.logical-box.frozen-code span{
+        background:#475569}
+    .frozen-link{opacity:.7}
+    .swatch.frozen{background:#64748b2b;border-color:#64748b;border-style:dotted}
+    .swatch.locked-row{background:#94a3b81a;border-color:#94a3b8}
+    #frozenRuleSummary{width:100%;padding:7px 9px;border:1px solid #cbd5e1;
+        border-radius:6px;color:#475569;background:#f8fafc;font-size:13px}
     .annotation-drag{position:absolute;border:3px dashed #eab308;background:#facc1526;
         pointer-events:none;z-index:2147483647;display:none}
     .logical-box.annotation-code{border-color:#dc2626}
@@ -52,9 +64,14 @@ annotationToolbar.innerHTML = `
     <button id="clearSelection" class="secondary">Hủy chọn</button>
     <button id="undoAnnotation" class="secondary">Hoàn tác annotation</button>
     <button id="editConfirmed" class="secondary">Sửa phiếu đã xác nhận</button>
+    <div id="frozenRuleSummary" role="status"></div>
     <div id="groupSummary" role="status" aria-live="polite"></div>
 `;
 document.querySelector(".control-panel").appendChild(annotationToolbar);
+document.querySelector(".legend").insertAdjacentHTML("beforeend", `
+    <span class="legend-item"><span class="swatch frozen"></span>Đã khóa từ rule trước</span>
+    <span class="legend-item"><span class="swatch locked-row"></span>Hàng Y đã khóa</span>
+`);
 const modeSelect = document.getElementById("annotationMode");
 const commitButton = document.getElementById("commitGroup");
 const inlineGroupButton = document.getElementById("inlineGroup");
@@ -72,18 +89,66 @@ function allPairIds(pair) {
     return [...(pair.code?.regionIds || []), ...pair.key.regionIds, ...pair.value.regionIds];
 }
 
+function pairRowRange(pair) {
+    const boxes = [pair.code, pair.key, pair.value].filter(Boolean).map(block => block.box);
+    const top = Math.min(...boxes.map(box => box[1]));
+    const bottom = Math.max(...boxes.map(box => box[3]));
+    const padding = Math.max(6, (bottom - top) * 0.35);
+    return {top: top - padding, bottom: bottom + padding};
+}
+
+function isLockedRow(region) {
+    if (!region) return false;
+    const y = centerY(region);
+    return annotation.lockedRows.some(row => y >= row.top && y <= row.bottom);
+}
+
+function activePairs() {
+    return [...state.examples, ...state.predictions];
+}
+
+function visibleFrozenPairs() {
+    const activeIds = new Set(activePairs().flatMap(allPairIds));
+    return annotation.frozenPairs.filter(pair => (
+        pairSource(pair) === "manual"
+        || !allPairIds(pair).some(id => activeIds.has(id))
+    ));
+}
+
 function allPairs() {
-    return [...annotation.frozenPairs, ...state.examples, ...state.predictions];
+    return [...visibleFrozenPairs(), ...activePairs()];
 }
 
 function pairSource(pair) {
     return pair.source || (state.examples.includes(pair) ? "manual" : "rule");
 }
 
+function frozenPairsTouching(ids) {
+    return annotation.frozenPairs.filter(pair => (
+        allPairIds(pair).some(id => ids.includes(id))
+    ));
+}
+
+function isLockedFrozenSample(pair) {
+    return annotation.frozenPairs.includes(pair) && pairSource(pair) === "manual";
+}
+
+function releaseFrozenPredictions(ids) {
+    const conflicts = frozenPairsTouching(ids);
+    const manualConflict = conflicts.find(pair => pairSource(pair) === "manual");
+    if (manualConflict) {
+        instruction.textContent = "Vùng thuộc mẫu người dùng của rule đã ngắt. Hãy chuyển sang Kiểm tra / sửa cặp để sửa hoặc xóa mẫu đó.";
+        return false;
+    }
+    annotation.frozenPairs = annotation.frozenPairs.filter(pair => !conflicts.includes(pair));
+    return true;
+}
+
 function snapshotAnnotation() {
     return structuredClone({
         examples: state.examples, predictions: state.predictions,
         frozenPairs: annotation.frozenPairs,
+        lockedRows: annotation.lockedRows,
         labels: annotation.labels, groups: annotation.groups,
         selected: [...annotation.selected], suppressed: [...state.suppressedPairIds],
         suppressionHistory: state.suppressionHistory, confirmed: state.confirmed,
@@ -103,6 +168,7 @@ function restoreAnnotation(snapshot) {
     state.headerProbe = snapshot.headerProbe;
     annotation.labels = snapshot.labels;
     annotation.frozenPairs = snapshot.frozenPairs || [];
+    annotation.lockedRows = snapshot.lockedRows || [];
     annotation.groups = snapshot.groups;
     annotation.selected = new Set(snapshot.selected);
     annotation.editing = snapshot.editing;
@@ -161,20 +227,26 @@ updateButtons = function () {
     const unlabeledCount = Object.values(annotation.labels).filter(labels => labels.includes("UNLABELED")).length;
     document.getElementById("groupSummary").textContent =
         `${selectedCount} region đang chọn · ${unlabeledCount} UNLABELED chủ động · `
-        + `${annotation.frozenPairs.length} cặp đã ngắt rule. ${groups}`;
+        + `${visibleFrozenPairs().length} cặp đã ngắt rule · ${annotation.lockedRows.length} hàng Y đã khóa. ${groups}`;
+    document.getElementById("frozenRuleSummary").textContent = visibleFrozenPairs().length
+        ? `${visibleFrozenPairs().length} cặp đã khóa từ rule trước; `
+            + `${annotation.lockedRows.length} hàng Y của mẫu cũ cũng bị loại khỏi rule mới.`
+        : "Chưa có cặp nào được khóa từ rule trước.";
 };
 
 updateSteps = function () {
     selectionStatus.textContent = state.confirmed
         ? "Đã xác nhận và lưu phiếu"
         : `${annotation.groups.length} nhóm đã chốt · ${state.examples.length} mẫu · `
-        + `${state.predictions.length} suy luận · ${annotation.frozenPairs.length} cặp đã ngắt rule`;
+        + `${state.predictions.length} suy luận · ${visibleFrozenPairs().length} cặp đã ngắt rule`;
 };
 
 refreshBoxStyles = function () {
     original.styles();
     const labels = visibleAnnotations();
     const groupIds = new Set(annotation.groups.flatMap(group => group.regionIds));
+    const frozenKeyIds = new Set(visibleFrozenPairs().flatMap(pair => pair.key.regionIds));
+    const frozenValueIds = new Set(visibleFrozenPairs().flatMap(pair => pair.value.regionIds));
     for (const box of boxLayer.children) {
         const id = box.dataset.regionId;
         const roles = labels[id] || [];
@@ -182,6 +254,9 @@ refreshBoxStyles = function () {
             box.classList.toggle(`annotation-${role.toLowerCase()}`, roles.includes(role));
         }
         box.classList.toggle("annotation-selected", annotation.selected.has(id) || groupIds.has(id));
+        box.classList.toggle("annotation-frozen-key", frozenKeyIds.has(id));
+        box.classList.toggle("annotation-frozen-value", frozenValueIds.has(id));
+        box.classList.toggle("annotation-locked-row", isLockedRow(regionById.get(id)));
         if (roles.length || annotation.selected.has(id) || groupIds.has(id)) {
             box.classList.remove("hidden-unused");
         }
@@ -191,21 +266,23 @@ refreshBoxStyles = function () {
 
 renderLogicalBlocks = function () {
     original.logical();
-    for (const pair of annotation.frozenPairs) {
-        appendLogicalBox(pair.key, "manual-key", "KEY đã ngắt rule");
-        appendLogicalBox(pair.value, "manual-value", "VALUE đã ngắt rule");
+    for (const pair of visibleFrozenPairs()) {
+        appendLogicalBox(pair.key, "frozen-key", "KEY đã khóa từ rule trước");
+        appendLogicalBox(pair.value, "frozen-value", "VALUE đã khóa từ rule trước");
+        if (pair.code) appendLogicalBox(pair.code, "frozen-code", "CODE đã khóa từ rule trước");
     }
-    for (const pair of allPairs()) {
+    for (const pair of activePairs()) {
         if (pair.code) appendLogicalBox(pair.code, "annotation-code", "CODE gộp");
     }
 };
 
 renderLinks = function () {
     original.links();
-    for (const pair of annotation.frozenPairs) {
-        svgLine(pair, "manual-link", "#15803d", "");
+    for (const pair of visibleFrozenPairs()) {
+        svgLine(pair, "frozen-link", "#64748b", "6 8");
+        if (pair.code) svgLine({key: pair.code, value: pair.key}, "frozen-link", "#64748b", "6 8");
     }
-    for (const pair of allPairs()) {
+    for (const pair of activePairs()) {
         if (pair.code) svgLine({key: pair.code, value: pair.key}, "code-link", "#dc2626", "");
     }
 };
@@ -247,7 +324,9 @@ recomputePreview = function () {
     if (!state.confirmed) {
         const allRegions = pages[currentPageIndex].regions;
         const examples = state.examples;
-        const frozenIds = new Set(annotation.frozenPairs.flatMap(allPairIds));
+        const frozenIds = new Set(annotation.frozenPairs.filter(
+            pair => pairSource(pair) === "manual",
+        ).flatMap(allPairIds));
         const predictions = [];
         const headers = [];
         const suspected = new Set();
@@ -259,7 +338,8 @@ recomputePreview = function () {
             if (!family.length) continue;
             const outside = new Set(examples.filter(pair => !family.includes(pair)).flatMap(allPairIds));
             const codes = new Set(examples.flatMap(pair => pair.code?.regionIds || []));
-            regions = allRegions.filter(region => !annotation.labels[region.id] && !frozenIds.has(region.id)
+            regions = allRegions.filter(region => !annotation.labels[region.id]
+                && !frozenIds.has(region.id) && !isLockedRow(region)
                 && !outside.has(region.id) && !codes.has(region.id));
             state.examples = family;
             state.rule = inferRule();
@@ -277,7 +357,8 @@ recomputePreview = function () {
             const familyPredictions = state.predictions;
             if (hasCode) {
                 regions = allRegions.filter(region => !annotation.labels[region.id]
-                    && !frozenIds.has(region.id) && !outside.has(region.id));
+                    && !frozenIds.has(region.id) && !isLockedRow(region)
+                    && !outside.has(region.id));
                 state.examples = family.map(pair => ({key: pair.code, value: pair.key, mode: "spatial"}));
                 const codeRule = inferRule();
                 const codeCandidates = predictPairs(codeRule).filter(pair =>
@@ -307,7 +388,7 @@ recomputePreview = function () {
         state.headerProbe = probe;
         state.suspectedHeaderIds = suspected;
         const occupied = new Set([
-            ...annotation.frozenPairs,
+            ...annotation.frozenPairs.filter(pair => pairSource(pair) === "manual"),
             ...examples,
         ].flatMap(allPairIds));
         const codedPairs = new Set(predictions.filter(pair => pair.code).map(pairInstanceId));
@@ -334,8 +415,13 @@ function cancelGroupSelection() {
 let lastSampleTapId = null;
 selectRegion = function (id) {
     if (state.confirmed || suppressClick) return;
+    const region = regionById.get(id);
+    if (annotation.mode === "sample" && isLockedRow(region)) {
+        instruction.textContent = "Hàng Y này đã thuộc rule trước và đang bị khóa; hãy chọn mẫu ở hàng khác.";
+        return;
+    }
     if (annotation.mode === "inspect") {
-        const pair = [...state.examples, ...state.predictions].find(pair => allPairIds(pair).includes(id));
+        const pair = allPairs().find(pair => allPairIds(pair).includes(id));
         if (pair) openPredictionPopover(pair);
         return;
     }
@@ -363,7 +449,12 @@ function finishGroups() {
             ...(pair.code?.regionIds || []),
             ...state.examples.flatMap(example => example.code?.regionIds || []),
         ]);
-        regions = regions.filter(region => !annotation.labels[region.id] && !excluded.has(region.id));
+        const frozenIds = new Set(annotation.frozenPairs.filter(
+            pair => pairSource(pair) === "manual",
+        ).flatMap(allPairIds));
+        regions = regions.filter(region => !annotation.labels[region.id]
+            && !frozenIds.has(region.id) && !isLockedRow(region)
+            && !excluded.has(region.id));
         const grouped = buildExample(key.regionIds[0], value.regionIds[0]);
         regions = allRegions;
         if (grouped) pair = {...grouped, code: pair.code};
@@ -383,11 +474,21 @@ function finishGroups() {
 
 commitButton.addEventListener("click", () => {
     const ids = [...annotation.selected];
-    const used = new Set([...allPairs().flatMap(allPairIds), ...annotation.groups.flatMap(group => group.regionIds)]);
-    if (ids.some(id => used.has(id) || annotation.labels[id])) {
+    const activeUsed = new Set([
+        ...state.examples.flatMap(allPairIds),
+        ...state.predictions.flatMap(allPairIds),
+        ...annotation.groups.flatMap(group => group.regionIds),
+    ]);
+    if (ids.some(id => activeUsed.has(id) || annotation.labels[id]
+        || isLockedRow(regionById.get(id)))) {
+        if (ids.some(id => isLockedRow(regionById.get(id)))) {
+            instruction.textContent = "Hàng Y này đã thuộc rule trước và đang bị khóa; hãy chọn mẫu ở hàng khác.";
+            return;
+        }
         instruction.textContent = "Vùng đã thuộc mẫu hoặc có nhãn. Hãy sửa mẫu/gỡ nhãn trước khi dùng lại.";
         return;
     }
+    if (!releaseFrozenPredictions(ids)) return;
     rememberAnnotation();
     annotation.groups.push(combineRegions(ids.map(id => regionById.get(id))));
     annotation.selected.clear();
@@ -402,6 +503,9 @@ commitButton.addEventListener("click", () => {
 finishPairButton.addEventListener("click", () => { rememberAnnotation(); finishGroups(); });
 breakRuleButton.addEventListener("click", () => {
     rememberAnnotation();
+    annotation.lockedRows.push(
+        ...[...state.examples, ...state.predictions].map(pairRowRange),
+    );
     const frozenIds = new Set([...state.examples, ...state.predictions].flatMap(allPairIds));
     for (const pair of [...state.autoHeaders, ...(state.headerProbe ? [state.headerProbe] : [])]) {
         for (const id of allPairIds(pair)) {
@@ -429,14 +533,20 @@ inlineGroupButton.addEventListener("click", () => {
 });
 
 editPrediction = function (pair) {
+    if (isLockedFrozenSample(pair)) {
+        instruction.textContent = "Mẫu của rule đã ngắt đang được khóa; hãy tạo mẫu mới cho rule hiện tại.";
+        return;
+    }
     if (annotation.groups.length || annotation.selected.size || annotation.editing) {
         instruction.textContent = "Hãy hoàn tất hoặc hủy mẫu đang chọn trước khi sửa cặp khác.";
         return;
     }
     rememberAnnotation();
-    const manual = state.examples.includes(pair);
-    annotation.editing = {pair: structuredClone(pair), manual};
+    const frozen = annotation.frozenPairs.includes(pair);
+    const manual = pairSource(pair) === "manual";
+    annotation.editing = {pair: structuredClone(pair), manual, frozen};
     state.examples = state.examples.filter(example => example !== pair);
+    annotation.frozenPairs = annotation.frozenPairs.filter(example => example !== pair);
     state.suppressedPairIds.add(pairInstanceId(pair));
     annotation.mode = "sample";
     modeSelect.value = "sample";
@@ -446,9 +556,10 @@ editPrediction = function (pair) {
 
 cancelCurrentKey = function () {
     if (annotation.editing) {
-        const {pair, manual} = annotation.editing;
+        const {pair, manual, frozen} = annotation.editing;
         state.suppressedPairIds.delete(pairInstanceId(pair));
-        if (manual) state.examples.push(pair);
+        if (frozen) annotation.frozenPairs.push(pair);
+        else if (manual) state.examples.push(pair);
     }
     annotation.editing = null;
     annotation.groups = [];
@@ -458,7 +569,16 @@ cancelCurrentKey = function () {
 
 const originalSuppress = suppressPrediction;
 suppressPrediction = function (pair) {
+    if (isLockedFrozenSample(pair)) {
+        instruction.textContent = "Mẫu của rule đã ngắt đang được khóa, không thể xóa từ rule mới.";
+        return;
+    }
     rememberAnnotation();
+    if (annotation.frozenPairs.includes(pair)) {
+        annotation.frozenPairs = annotation.frozenPairs.filter(item => item !== pair);
+        recomputePreview();
+        return;
+    }
     state.examples = state.examples.filter(example => example !== pair);
     originalSuppress(pair);
 };
@@ -474,6 +594,7 @@ confirmInlineSelection = function () {
         inlineError.textContent = "Region đã có nhãn hoặc thuộc mẫu; hãy gỡ nhãn/sửa mẫu trước.";
         return;
     }
+    if (!releaseFrozenPredictions([id])) return;
     rememberAnnotation();
     if (annotation.editing) {
         state.suppressedPairIds.delete(pairInstanceId(annotation.editing.pair));
@@ -488,6 +609,10 @@ confirmInlineSelection = function () {
 function applySelectedLabel() {
     const ids = new Set(annotation.selected);
     const affected = allPairs().filter(pair => allPairIds(pair).some(id => ids.has(id)));
+    if (affected.some(isLockedFrozenSample)) {
+        instruction.textContent = "Region thuộc mẫu của rule đã ngắt; không thể đổi nhãn từ rule mới.";
+        return;
+    }
     const annotated = visibleAnnotations();
     const existingCount = [...ids].filter(id => annotated[id]).length;
     if ((affected.length || existingCount) && !window.confirm(
@@ -559,7 +684,8 @@ boxLayer.addEventListener("pointerup", event => {
         const end = imagePoint(event);
         if (!drag.add) annotation.selected.clear();
         for (const region of regions) {
-            if (centerX(region) >= Math.min(drag.start[0], end[0]) && centerX(region) <= Math.max(drag.start[0], end[0])
+            if (!isLockedRow(region)
+                && centerX(region) >= Math.min(drag.start[0], end[0]) && centerX(region) <= Math.max(drag.start[0], end[0])
                 && centerY(region) >= Math.min(drag.start[1], end[1]) && centerY(region) <= Math.max(drag.start[1], end[1])) {
                 annotation.selected.add(region.id);
             }
@@ -575,7 +701,8 @@ boxLayer.addEventListener("pointercancel", () => { drag = null; dragBox.style.di
 
 resetAll = function () {
     annotation.selected = new Set(); annotation.groups = []; annotation.labels = {};
-    annotation.history = []; annotation.editing = null; annotation.frozenPairs = []; annotation.dirty = false;
+    annotation.history = []; annotation.editing = null; annotation.frozenPairs = [];
+    annotation.lockedRows = []; annotation.dirty = false;
     original.reset();
     instruction.textContent = "Chọn một hoặc nhiều bbox rồi Chốt nhóm. Hai nhóm: KEY/VALUE; ba nhóm: CODE/KEY/VALUE.";
 };
