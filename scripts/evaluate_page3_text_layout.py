@@ -1,5 +1,5 @@
 # Mục đích: đánh giá checkpoint LayoutLMv3 text + bbox trên dataset annotation.
-# Chức năng: đo nhận diện KEY, VALUE, HEADER và liên kết KEY → VALUE.
+# Chức năng: đo nhận diện CODE/KEY/VALUE/HEADER và các liên kết theo hàng.
 # Luồng xử lý: tải checkpoint → dự đoán từng phiếu → so sánh region/cạnh với nhãn thật → ghi metric.
 # Cấu hình/parameter: dataset, checkpoint, device, threshold và output nhận từ command line.
 # Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.train_page3_text_layout.
@@ -21,7 +21,7 @@ from scripts.page3_layout_model import (
 from scripts.train_page3_text_layout import prepare_page
 
 
-EVALUATED_ROLES = ["KEY", "VALUE", "HEADER"]
+EVALUATED_ROLES = ["CODE", "KEY", "VALUE", "HEADER"]
 
 
 def set_counts(gold, predicted):
@@ -71,7 +71,7 @@ def load_model(checkpoint_directory, device):
 
 
 def evaluate(arguments):
-    """Đánh giá nhận diện region và liên kết KEY → VALUE."""
+    """Đánh giá nhận diện region và các liên kết CODE/KEY/VALUE."""
     dataset = json.loads(arguments.dataset.read_text(encoding="utf-8"))
     records = [
         record
@@ -83,6 +83,8 @@ def evaluate(arguments):
     link_modes = ["learned", "row"] if arguments.link_mode == "both" \
         else [arguments.link_mode]
     link_counts = {mode: [0, 0, 0] for mode in link_modes}
+    code_key_counts = [0, 0, 0]
+    code_key_value_counts = [0, 0, 0]
     ignored_unlabeled = 0
 
     with torch.inference_mode():
@@ -155,6 +157,58 @@ def evaluate(arguments):
                     for left, right in zip(link_counts[mode], counts)
                 ]
 
+            gold_code_key_links = {
+                (code_id, key_id)
+                for relation in page["relations"]
+                for code_id in relation.get("code_region_ids") or []
+                for key_id in relation["key_region_ids"]
+                if code_id in known_ids and key_id in known_ids
+            }
+            predicted_code_key_links = {
+                (link["code_region_id"], link["key_region_id"])
+                for link in prediction["code_key_links_by_mode"]["row"]
+                if link["code_region_id"] in known_ids
+                and link["key_region_id"] in known_ids
+            }
+            counts = set_counts(
+                gold_code_key_links,
+                predicted_code_key_links,
+            )
+            code_key_counts = [
+                left + right
+                for left, right in zip(code_key_counts, counts)
+            ]
+
+            gold_code_key_value_links = {
+                (code_id, key_id, value_id)
+                for relation in page["relations"]
+                for code_id in relation.get("code_region_ids") or []
+                for key_id in relation["key_region_ids"]
+                for value_id in relation["value_region_ids"]
+                if code_id in known_ids
+                and key_id in known_ids
+                and value_id in known_ids
+            }
+            predicted_code_key_value_links = {
+                (
+                    link["code_region_id"],
+                    link["key_region_id"],
+                    link["value_region_id"],
+                )
+                for link in prediction["code_key_value_links_by_mode"]["row"]
+                if link["code_region_id"] in known_ids
+                and link["key_region_id"] in known_ids
+                and link["value_region_id"] in known_ids
+            }
+            counts = set_counts(
+                gold_code_key_value_links,
+                predicted_code_key_value_links,
+            )
+            code_key_value_counts = [
+                left + right
+                for left, right in zip(code_key_value_counts, counts)
+            ]
+
     role_metrics = {
         role: metric_from_counts(*counts)
         for role, counts in role_counts.items()
@@ -163,6 +217,8 @@ def evaluate(arguments):
         mode: metric_from_counts(*counts)
         for mode, counts in link_counts.items()
     }
+    code_key_metrics = metric_from_counts(*code_key_counts)
+    code_key_value_metrics = metric_from_counts(*code_key_value_counts)
     result = {
         "dataset": str(arguments.dataset),
         "checkpoint": str(arguments.checkpoint),
@@ -173,6 +229,9 @@ def evaluate(arguments):
         "ignored_unlabeled_regions": ignored_unlabeled,
         "region_metrics": role_metrics,
         "key_value_link_metrics_by_mode": link_metrics_by_mode,
+        "code_link_mode": "row",
+        "code_key_link_metrics": code_key_metrics,
+        "code_key_value_link_metrics": code_key_value_metrics,
     }
     if arguments.link_mode != "both":
         result["key_value_link_metrics"] = link_metrics_by_mode[arguments.link_mode]
@@ -193,6 +252,18 @@ def evaluate(arguments):
             f"precision={metrics['precision']:.4f}, "
             f"recall={metrics['recall']:.4f}, F1={metrics['f1']:.4f}"
         )
+    print(
+        "CODE → KEY [row-link]: "
+        f"precision={code_key_metrics['precision']:.4f}, "
+        f"recall={code_key_metrics['recall']:.4f}, "
+        f"F1={code_key_metrics['f1']:.4f}"
+    )
+    print(
+        "CODE → KEY → VALUE [row-link]: "
+        f"precision={code_key_value_metrics['precision']:.4f}, "
+        f"recall={code_key_value_metrics['recall']:.4f}, "
+        f"F1={code_key_value_metrics['f1']:.4f}"
+    )
 
 
 def main():
@@ -208,7 +279,7 @@ def main():
         "--link-mode",
         choices=["learned", "row", "both"],
         default="learned",
-        help="Cách tạo liên kết KEY → VALUE.",
+        help="Cách tạo liên kết KEY → VALUE; liên kết CODE dùng row-link.",
     )
     parser.add_argument("--device", default="cpu")
     arguments = parser.parse_args()

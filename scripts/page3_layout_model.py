@@ -1,9 +1,10 @@
 # Mục đích: so sánh LayoutLMv3 có ảnh và LayoutLMv3 chỉ dùng text + bbox.
-# Chức năng: mã hóa OCR, dự đoán đa nhãn region và liên kết key → value.
+# Chức năng: mã hóa OCR, dự đoán đa nhãn region và các liên kết region.
 # Luồng xử lý: chia token thành chunk → encoder → gộp region → hai head.
 # Cấu hình/parameter: variant A/B, checkpoint encoder, danh sách role.
 # Quan hệ: dùng chung bởi lệnh train và compare trong compare_page3_layout.
-# Input/output: một page OCR → logits [region, role] và [region, region].
+# Input/output: một page OCR → logits [region, role] và [region, region],
+# cùng các liên kết KEY → VALUE, CODE → KEY và CODE → KEY → VALUE.
 # Contract: A dùng ảnh; B visual_embed=False; cùng tokenizer/head/cách pooling.
 # Contract: không cắt bỏ token cuối trang; cạnh có thể nối region khác chunk.
 
@@ -173,19 +174,38 @@ def same_row_score(first, second):
     return 0.0
 
 
-def row_links(regions):
-    """Tạo cạnh giữa mọi KEY và VALUE cùng hàng Y."""
-    keys = [region for region in regions if "KEY" in region["labels"]]
-    values = [region for region in regions if "VALUE" in region["labels"]]
+def row_links(regions, source_role, target_role, source_field, target_field):
+    """Tạo cạnh giữa hai vai trò cùng hàng Y."""
+    sources = [
+        region for region in regions if source_role in region["labels"]
+    ]
+    targets = [
+        region for region in regions if target_role in region["labels"]
+    ]
     links = []
-    for key in keys:
-        for value in values:
-            score = same_row_score(key, value)
+    for source in sources:
+        for target in targets:
+            score = same_row_score(source, target)
             if score:
                 links.append({
-                    "key_region_id": key["id"],
-                    "value_region_id": value["id"],
+                    source_field: source["id"],
+                    target_field: target["id"],
                     "score": score,
+                })
+    return links
+
+
+def row_chain_links(code_key_links, key_value_links):
+    """Ghép các cạnh CODE → KEY và KEY → VALUE thành bộ ba."""
+    links = []
+    for code_key in code_key_links:
+        for key_value in key_value_links:
+            if code_key["key_region_id"] == key_value["key_region_id"]:
+                links.append({
+                    "code_region_id": code_key["code_region_id"],
+                    "key_region_id": code_key["key_region_id"],
+                    "value_region_id": key_value["value_region_id"],
+                    "score": min(code_key["score"], key_value["score"]),
                 })
     return links
 
@@ -221,15 +241,44 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
                     "value_region_id": value["id"],
                     "score": score,
                 })
+    row_key_value_links = row_links(
+        regions,
+        "KEY",
+        "VALUE",
+        "key_region_id",
+        "value_region_id",
+    )
+    row_code_key_links = row_links(
+        regions,
+        "CODE",
+        "KEY",
+        "code_region_id",
+        "key_region_id",
+    )
+    row_code_key_value_links = row_chain_links(
+        row_code_key_links,
+        row_key_value_links,
+    )
     links_by_mode = {
         "learned": learned_links,
-        "row": row_links(regions),
+        "row": row_key_value_links,
     }
+    selected_links = links_by_mode[
+        "learned" if link_mode == "both" else link_mode
+    ]
     result = {
         "regions": regions,
         "link_mode": link_mode,
-        "links": links_by_mode["learned" if link_mode == "both" else link_mode],
+        "links": selected_links,
+        "code_key_links": row_code_key_links if link_mode != "learned" else [],
+        "code_key_value_links": (
+            row_code_key_value_links if link_mode != "learned" else []
+        ),
     }
     if link_mode == "both":
         result["links_by_mode"] = links_by_mode
+    result["code_key_links_by_mode"] = {"row": row_code_key_links}
+    result["code_key_value_links_by_mode"] = {
+        "row": row_code_key_value_links,
+    }
     return result

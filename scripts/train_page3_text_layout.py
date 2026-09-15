@@ -125,7 +125,7 @@ def train(arguments):
 
 
 def predict(arguments):
-    """Dự đoán nhãn và cạnh KEY → VALUE theo ID, không dùng annotation làm đầu vào."""
+    """Dự đoán nhãn và các cạnh region theo ID, không dùng annotation làm đầu vào."""
     checkpoint = torch.load(
         arguments.checkpoint / "model.pt",
         map_location=arguments.device,
@@ -192,7 +192,7 @@ def main():
         "--link-mode",
         choices=["learned", "row", "both"],
         default="learned",
-        help="Cách tạo liên kết KEY → VALUE.",
+        help="Cách tạo liên kết KEY → VALUE; liên kết CODE dùng row-link.",
     )
     for command in [train_parser, predict_parser]:
         command.add_argument("--device", default="cpu")
