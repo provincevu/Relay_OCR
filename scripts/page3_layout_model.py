@@ -150,8 +150,50 @@ def training_loss(role_logits, link_logits, page):
     return role_loss + link_loss
 
 
-def predict_page(model, encoded, page, roles, threshold):
-    """Trả vai trò và cạnh region; cạnh inline giữ cùng ID ở hai đầu."""
+def same_row_score(first, second):
+    """Tính độ phù hợp cùng hàng Y từ phần giao nhau và tâm bbox."""
+    first_box = first["bbox"]
+    second_box = second["bbox"]
+    overlap = max(
+        0,
+        min(first_box[3], second_box[3])
+        - max(first_box[1], second_box[1]),
+    )
+    first_height = max(first_box[3] - first_box[1], 1)
+    second_height = max(second_box[3] - second_box[1], 1)
+    overlap_ratio = overlap / min(first_height, second_height)
+    first_center = (first_box[1] + first_box[3]) / 2
+    second_center = (second_box[1] + second_box[3]) / 2
+    center_gap = abs(first_center - second_center)
+    center_limit = max(first_height, second_height) * 0.5
+    if overlap_ratio >= 0.5:
+        return min(overlap_ratio, 1.0)
+    if center_gap <= center_limit:
+        return max(0.0, 1.0 - center_gap / center_limit)
+    return 0.0
+
+
+def row_links(regions):
+    """Tạo cạnh giữa mọi KEY và VALUE cùng hàng Y."""
+    keys = [region for region in regions if "KEY" in region["labels"]]
+    values = [region for region in regions if "VALUE" in region["labels"]]
+    links = []
+    for key in keys:
+        for value in values:
+            score = same_row_score(key, value)
+            if score:
+                links.append({
+                    "key_region_id": key["id"],
+                    "value_region_id": value["id"],
+                    "score": score,
+                })
+    return links
+
+
+def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
+    """Trả vai trò và cạnh region theo learned-link, row-link hoặc cả hai."""
+    if link_mode not in {"learned", "row", "both"}:
+        raise ValueError("link_mode phải là learned, row hoặc both.")
     role_logits, link_logits = model(encoded, len(page["regions"]))
     role_scores = role_logits.sigmoid().cpu().tolist()
     link_scores = link_logits.sigmoid().cpu().tolist()
@@ -167,16 +209,27 @@ def predict_page(model, encoded, page, roles, threshold):
             ] or ["OTHER"],
             "scores": dict(zip(roles, scores, strict=True)),
         })
-    links = []
+    learned_links = []
     for key_index, key in enumerate(regions):
         if "KEY" not in key["labels"]:
             continue
         for value_index, value in enumerate(regions):
             score = link_scores[key_index][value_index]
             if "VALUE" in value["labels"] and score >= threshold:
-                links.append({
+                learned_links.append({
                     "key_region_id": key["id"],
                     "value_region_id": value["id"],
                     "score": score,
                 })
-    return {"regions": regions, "links": links}
+    links_by_mode = {
+        "learned": learned_links,
+        "row": row_links(regions),
+    }
+    result = {
+        "regions": regions,
+        "link_mode": link_mode,
+        "links": links_by_mode["learned" if link_mode == "both" else link_mode],
+    }
+    if link_mode == "both":
+        result["links_by_mode"] = links_by_mode
+    return result

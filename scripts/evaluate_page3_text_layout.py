@@ -80,7 +80,9 @@ def evaluate(arguments):
     ]
     model, tokenizer, roles = load_model(arguments.checkpoint, arguments.device)
     role_counts = {role: [0, 0, 0] for role in EVALUATED_ROLES}
-    link_counts = [0, 0, 0]
+    link_modes = ["learned", "row"] if arguments.link_mode == "both" \
+        else [arguments.link_mode]
+    link_counts = {mode: [0, 0, 0] for mode in link_modes}
     ignored_unlabeled = 0
 
     with torch.inference_mode():
@@ -106,6 +108,7 @@ def evaluate(arguments):
                 page,
                 roles,
                 arguments.threshold,
+                arguments.link_mode,
             )
             predicted_labels = {
                 region["id"]: set(region["labels"])
@@ -135,32 +138,44 @@ def evaluate(arguments):
                 for value_id in relation["value_region_ids"]
                 if key_id in known_ids and value_id in known_ids
             }
-            predicted_links = {
-                (link["key_region_id"], link["value_region_id"])
-                for link in prediction["links"]
-                if link["key_region_id"] in known_ids
-                and link["value_region_id"] in known_ids
-            }
-            counts = set_counts(gold_links, predicted_links)
-            link_counts = [
-                left + right
-                for left, right in zip(link_counts, counts)
-            ]
+            links_by_mode = prediction.get(
+                "links_by_mode",
+                {arguments.link_mode: prediction["links"]},
+            )
+            for mode in link_modes:
+                predicted_links = {
+                    (link["key_region_id"], link["value_region_id"])
+                    for link in links_by_mode[mode]
+                    if link["key_region_id"] in known_ids
+                    and link["value_region_id"] in known_ids
+                }
+                counts = set_counts(gold_links, predicted_links)
+                link_counts[mode] = [
+                    left + right
+                    for left, right in zip(link_counts[mode], counts)
+                ]
 
     role_metrics = {
         role: metric_from_counts(*counts)
         for role, counts in role_counts.items()
+    }
+    link_metrics_by_mode = {
+        mode: metric_from_counts(*counts)
+        for mode, counts in link_counts.items()
     }
     result = {
         "dataset": str(arguments.dataset),
         "checkpoint": str(arguments.checkpoint),
         "device": arguments.device,
         "threshold": arguments.threshold,
+        "link_mode": arguments.link_mode,
         "pages": len(records),
         "ignored_unlabeled_regions": ignored_unlabeled,
         "region_metrics": role_metrics,
-        "key_value_link_metrics": metric_from_counts(*link_counts),
+        "key_value_link_metrics_by_mode": link_metrics_by_mode,
     }
+    if arguments.link_mode != "both":
+        result["key_value_link_metrics"] = link_metrics_by_mode[arguments.link_mode]
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(
         json.dumps(result, ensure_ascii=False, indent=2),
@@ -172,12 +187,12 @@ def evaluate(arguments):
             f"{role}: precision={metrics['precision']:.4f}, "
             f"recall={metrics['recall']:.4f}, F1={metrics['f1']:.4f}"
         )
-    metrics = result["key_value_link_metrics"]
-    print(
-        "KEY → VALUE: "
-        f"precision={metrics['precision']:.4f}, "
-        f"recall={metrics['recall']:.4f}, F1={metrics['f1']:.4f}"
-    )
+    for mode, metrics in link_metrics_by_mode.items():
+        print(
+            f"KEY → VALUE [{mode}-link]: "
+            f"precision={metrics['precision']:.4f}, "
+            f"recall={metrics['recall']:.4f}, F1={metrics['f1']:.4f}"
+        )
 
 
 def main():
@@ -189,6 +204,12 @@ def main():
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument(
+        "--link-mode",
+        choices=["learned", "row", "both"],
+        default="learned",
+        help="Cách tạo liên kết KEY → VALUE.",
+    )
     parser.add_argument("--device", default="cpu")
     arguments = parser.parse_args()
     evaluate(arguments)

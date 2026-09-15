@@ -152,6 +152,7 @@ def predict(arguments):
                 page,
                 checkpoint["roles"],
                 arguments.threshold,
+                arguments.link_mode,
             )
             # OTHER không đi cùng nhãn thực thể; KEY/VALUE cùng ID vẫn hợp lệ cho inline.
             for region in prediction["regions"]:
@@ -187,6 +188,12 @@ def main():
     predict_parser.add_argument("--checkpoint", type=Path, required=True)
     predict_parser.add_argument("--output", type=Path, required=True)
     predict_parser.add_argument("--threshold", type=float, default=0.5)
+    predict_parser.add_argument(
+        "--link-mode",
+        choices=["learned", "row", "both"],
+        default="learned",
+        help="Cách tạo liên kết KEY → VALUE.",
+    )
     for command in [train_parser, predict_parser]:
         command.add_argument("--device", default="cpu")
     arguments = parser.parse_args()
