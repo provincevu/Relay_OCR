@@ -179,7 +179,7 @@ def main():
     train_parser.add_argument("--dataset", type=Path, required=True)
     train_parser.add_argument("--output", type=Path, required=True)
     train_parser.add_argument("--encoder", default="microsoft/layoutlmv3-base")
-    train_parser.add_argument("--epochs", type=int, default=3)
+    train_parser.add_argument("--epochs", type=int, default=10)
     train_parser.add_argument("--learning-rate", type=float, default=2e-5)
     train_parser.add_argument("--seed", type=int, default=42)
     predict_parser = commands.add_parser("predict", help="Dự đoán từ annotation_manifest.json")
