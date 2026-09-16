@@ -1,14 +1,15 @@
 # Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3+.
-# Chức năng: render các page vật lý từ 3 trở đi, cache detector/recognition và hiển thị confidence.
+# Chức năng: render page 3+, chạy cache detector/recognition và tạo HTML; hỗ trợ đọc folder ảnh đã lọc.
 # Luồng xử lý: folder PDF → render page 3+ → recognition cache/OCR → HTML.
-# Cấu hình/parameter: nhận folder chứa PDF; render page ở 400 DPI.
+# Cấu hình/parameter: nhận folder PDF, --save-images hoặc --image-directory; render page ở 400 DPI.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
-# Input/output: đọc PDF; ghi ảnh, các cache và rule_induction.html.
+# Input/output: đọc PDF hoặc ảnh; ghi ảnh, các cache và rule_induction.html.
 # Contract: page 3+ là các page vật lý có số từ 3 trở đi.
 
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 from html import escape
@@ -23,6 +24,10 @@ from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
 
 DETECTOR_CACHE_VERSION = "PP-OCRv6_small_det-v1"
 RECOGNITION_CACHE_VERSION = "page3-plus-recognition-v1"
+IMAGE_FILE_PATTERN = re.compile(
+    r"^(?P<pdf_stem>.+)_page_(?P<physical_page>[1-9][0-9]*)\.(?:png|jpg|jpeg|bmp|tif|tiff)$",
+    re.IGNORECASE,
+)
 
 
 class CachedTextDetector:
@@ -109,10 +114,23 @@ def _render_pages_3plus(renderer, pdf_file, output_directory):
 
 
 def parse_arguments():
-    """Đọc folder PDF cần tạo giao diện Rule Induction."""
+    """Đọc nguồn dữ liệu và chế độ chạy Rule Induction."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("pdf_directory", type=Path)
-    return parser.parse_args()
+    parser.add_argument("pdf_directory", type=Path, nargs="?")
+    parser.add_argument("--image-directory", type=Path)
+    parser.add_argument(
+        "--save-images",
+        action="store_true",
+        help="Chỉ render page 3+ ra folder images, chưa chạy OCR.",
+    )
+    arguments = parser.parse_args()
+    if arguments.pdf_directory is None and arguments.image_directory is None:
+        parser.error("Cần truyền folder PDF hoặc --image-directory.")
+    if arguments.pdf_directory is not None and arguments.image_directory is not None:
+        parser.error("Chỉ chọn folder PDF hoặc --image-directory.")
+    if arguments.image_directory is not None and arguments.save_images:
+        parser.error("--save-images chỉ dùng với folder PDF.")
+    return arguments
 
 
 def build_html(pages):
@@ -2320,10 +2338,87 @@ def _recognize_regions_with_cache(extractor, image, cache_directory):
     return regions, False
 
 
-def main():
-    """Render các page 3+ của PDF và tạo một giao diện Rule Induction."""
-    arguments = parse_arguments()
-    pdf_directory = arguments.pdf_directory
+def _create_versioned_output_directory(pdf_directory):
+    """Tạo thư mục output mới dạng tên_folder_x cho mỗi lần chạy PDF."""
+    output_root = Path("./output/rule_induction")
+    output_root.mkdir(parents=True, exist_ok=True)
+    index = 1
+    while True:
+        output_directory = output_root / f"{pdf_directory.name}_{index}"
+        if not output_directory.exists():
+            output_directory.mkdir()
+            return output_directory
+        index += 1
+
+
+def _create_extractor(output_directory):
+    """Khởi tạo extractor và gắn cache detector theo output hiện tại."""
+    print("Đang khởi tạo các model OCR...", flush=True)
+    initialization_started = perf_counter()
+    extractor = Page3PlusKeyValueExtractor()
+    extractor.text_detector = CachedTextDetector(
+        extractor.text_detector,
+        output_directory / "detector_cache",
+    )
+    print(
+        f"Khởi tạo model/cache: {perf_counter() - initialization_started:.3f}s",
+        flush=True,
+    )
+    return extractor
+
+
+def _process_image(
+    extractor,
+    image_path,
+    output_directory,
+    pdf_name,
+    physical_page,
+):
+    """Chạy recognition trên một ảnh và tạo record tương thích với HTML."""
+    image = cv2.imread(str(image_path))
+    if image is None:
+        raise FileNotFoundError(f"Không đọc được ảnh: {image_path}")
+    image_height, image_width = image.shape[:2]
+    recognized_regions, recognition_cache_hit = _recognize_regions_with_cache(
+        extractor,
+        image,
+        output_directory / "recognition_cache",
+    )
+    image_name = image_path.relative_to(output_directory).as_posix()
+    page = {
+        "pdfName": pdf_name,
+        "physicalPage": physical_page,
+        "imageName": image_name,
+        "width": image_width,
+        "height": image_height,
+        "regions": recognized_regions,
+    }
+    return page, recognition_cache_hit
+
+
+def _write_html(pages, output_directory, batch_started, processed_count, total_count):
+    """Ghi HTML và in thống kê cho các page đã xử lý."""
+    html_path = output_directory / "rule_induction.html"
+    html_started = perf_counter()
+    html_path.write_text(
+        build_html(pages),
+        encoding="utf-8",
+    )
+    print(
+        f"Tạo và lưu HTML: {perf_counter() - html_started:.3f}s",
+        flush=True,
+    )
+    print(
+        f"Hoàn tất {len(pages)} page từ "
+        f"{processed_count}/{total_count} nguồn trong "
+        f"{perf_counter() - batch_started:.1f}s.",
+        flush=True,
+    )
+    print(f"HTML Rule Induction: {html_path}")
+
+
+def _run_pdf_directory(pdf_directory, save_images):
+    """Render và tùy chọn OCR page 3+ từ folder PDF."""
     if not pdf_directory.is_dir():
         raise FileNotFoundError(f"Không tìm thấy folder PDF: {pdf_directory}")
 
@@ -2338,22 +2433,39 @@ def main():
     if not pdf_files:
         raise FileNotFoundError(f"Không tìm thấy PDF trong: {pdf_directory}")
 
-    output_directory = Path("./output/rule_induction") / pdf_directory.name
-    output_directory.mkdir(parents=True, exist_ok=True)
-    print("Đang khởi tạo các model OCR...", flush=True)
-    initialization_started = perf_counter()
-    extractor = Page3PlusKeyValueExtractor()
-    extractor.text_detector = CachedTextDetector(
-        extractor.text_detector,
-        output_directory / "detector_cache",
-    )
-    print(
-        f"Khởi tạo model/cache: {perf_counter() - initialization_started:.3f}s",
-        flush=True,
-    )
-    pages = []
+    output_directory = _create_versioned_output_directory(pdf_directory)
+    image_directory = output_directory / "images" if save_images else output_directory
+    image_directory.mkdir(parents=True, exist_ok=True)
     batch_started = perf_counter()
     total_files = len(pdf_files)
+
+    if save_images:
+        rendered_count = 0
+        for file_index, pdf_file in enumerate(pdf_files, start=1):
+            progress = f"[{file_index}/{total_files}] {pdf_file.name}"
+            print(f"{progress} | Đang render các page 3+...", flush=True)
+            rendered_pages = _render_pages_3plus(
+                renderer,
+                pdf_file,
+                image_directory,
+            )
+            rendered_count += len(rendered_pages)
+            print(
+                f"{progress} | Đã render {len(rendered_pages)} page",
+                flush=True,
+            )
+        print(
+            f"Đã lưu {rendered_count} ảnh page 3+ tại: {image_directory}",
+            flush=True,
+        )
+        print(
+            "Hãy xóa ảnh không cần thiết, sau đó chạy lại với "
+            f'--image-directory "{image_directory}".',
+        )
+        return
+
+    extractor = _create_extractor(output_directory)
+    pages = []
     processed_pdf_count = 0
 
     for file_index, pdf_file in enumerate(pdf_files, start=1):
@@ -2382,29 +2494,14 @@ def main():
                 "đang đọc cache/chạy recognition...",
                 flush=True,
             )
-            image = cv2.imread(str(output_image_path))
-            if image is None:
-                raise FileNotFoundError(
-                    f"Không đọc được ảnh: {output_image_path}"
-                )
-            image_height, image_width = image.shape[:2]
-            recognized_regions, recognition_cache_hit = (
-                _recognize_regions_with_cache(
-                    extractor,
-                    image,
-                    output_directory / "recognition_cache",
-                )
+            page, recognition_cache_hit = _process_image(
+                extractor,
+                output_image_path,
+                output_directory,
+                pdf_file.name,
+                physical_page,
             )
-            pages.append(
-                {
-                    "pdfName": pdf_file.name,
-                    "physicalPage": physical_page,
-                    "imageName": output_image_path.name,
-                    "width": image_width,
-                    "height": image_height,
-                    "regions": recognized_regions,
-                }
-            )
+            pages.append(page)
             if recognition_cache_hit:
                 recognition_source = "cache recognition"
             else:
@@ -2423,23 +2520,101 @@ def main():
 
     if not pages:
         raise FileNotFoundError("Không có PDF nào chứa page 3+.")
+    _write_html(
+        pages,
+        output_directory,
+        batch_started,
+        processed_pdf_count,
+        total_files,
+    )
 
-    html_path = output_directory / "rule_induction.html"
-    html_started = perf_counter()
-    html_path.write_text(
-        build_html(pages),
-        encoding="utf-8",
+
+def _parse_image_metadata(image_path):
+    """Lấy tên PDF và số page vật lý từ tên ảnh do chế độ render tạo ra."""
+    match = IMAGE_FILE_PATTERN.fullmatch(image_path.name)
+    if not match:
+        raise ValueError(
+            "Tên ảnh phải có dạng <pdf_stem>_page_<số>.png/jpg: "
+            f"{image_path.name}"
+        )
+    return (
+        f"{match.group('pdf_stem')}.pdf",
+        int(match.group("physical_page")),
     )
-    print(
-        f"Tạo và lưu HTML: {perf_counter() - html_started:.3f}s",
-        flush=True,
+
+
+def _run_image_directory(image_directory):
+    """Chạy detector/recognition trên các ảnh còn lại trong folder đã lọc."""
+    image_directory = image_directory.resolve()
+    if not image_directory.is_dir():
+        raise FileNotFoundError(f"Không tìm thấy folder ảnh: {image_directory}")
+    output_directory = image_directory.parent
+    image_paths = sorted(
+        path
+        for path in image_directory.iterdir()
+        if path.is_file() and path.suffix.lower() in {
+            ".png",
+            ".jpg",
+            ".jpeg",
+            ".bmp",
+            ".tif",
+            ".tiff",
+        }
     )
-    print(
-        f"Hoàn tất {len(pages)} page từ "
-        f"{processed_pdf_count}/{total_files} PDF trong "
-        f"{perf_counter() - batch_started:.1f}s."
+    if not image_paths:
+        raise FileNotFoundError(f"Không có ảnh trong: {image_directory}")
+
+    extractor = _create_extractor(output_directory)
+    pages = []
+    batch_started = perf_counter()
+    for image_index, image_path in enumerate(image_paths, start=1):
+        pdf_name, physical_page = _parse_image_metadata(image_path)
+        page_started = perf_counter()
+        print(
+            f"[{image_index}/{len(image_paths)}] {image_path.name} | "
+            "đang đọc cache/chạy recognition...",
+            flush=True,
+        )
+        page, recognition_cache_hit = _process_image(
+            extractor,
+            image_path,
+            output_directory,
+            pdf_name,
+            physical_page,
+        )
+        pages.append(page)
+        if recognition_cache_hit:
+            recognition_source = "cache recognition"
+        else:
+            detector_source = (
+                "cache detector"
+                if extractor.text_detector.last_cache_hit
+                else "detector mới"
+            )
+            recognition_source = f"recognition mới, {detector_source}"
+        print(
+            f"[{image_index}/{len(image_paths)}] {image_path.name} | "
+            f"Hoàn tất trong {perf_counter() - page_started:.1f}s: "
+            f"{recognition_source}",
+            flush=True,
+        )
+
+    _write_html(
+        pages,
+        output_directory,
+        batch_started,
+        len(image_paths),
+        len(image_paths),
     )
-    print(f"HTML Rule Induction: {html_path}")
+
+
+def main():
+    """Điều phối chế độ PDF, render-only hoặc folder ảnh đã lọc."""
+    arguments = parse_arguments()
+    if arguments.image_directory is not None:
+        _run_image_directory(arguments.image_directory)
+        return
+    _run_pdf_directory(arguments.pdf_directory, arguments.save_images)
 
 
 if __name__ == "__main__":
