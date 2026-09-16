@@ -1,7 +1,7 @@
 # Mục đích: phục vụ giao diện và lưu dataset annotation page 3.
 # Chức năng: đọc/lưu phiếu đã xác nhận, giữ snapshot OCR và nhóm quan hệ.
-# Luồng xử lý: GET giao diện/dataset → POST một phiếu → ghi annotations.json.
-# Cấu hình/parameter: thư mục output và --port, mặc định 8001, chỉ localhost.
+# Luồng xử lý: GET giao diện/dataset → lọc ảnh tùy chọn → POST một phiếu → ghi annotations.json.
+# Cấu hình/parameter: thư mục output, tùy chọn folder ảnh và --port, mặc định 8001.
 # Quan hệ: phục vụ output của annotate_page3.py cho train_page3_text_layout.py.
 # Input/output: JSON phiên bản 1, pages ánh xạ image_name → phiếu đã xác nhận.
 # Contract: không lưu draft; chỉ ghi snapshot OCR khớp manifest và relation hợp lệ.
@@ -16,6 +16,36 @@ from threading import Lock
 
 
 LABELS = {"CODE", "KEY", "VALUE", "HEADER", "OTHER", "UNLABELED"}
+
+
+def _filter_manifest_pages(pages, directory, image_directory):
+    """Chỉ phục vụ các page có ảnh còn tồn tại trong folder được chọn."""
+    image_directory = image_directory.resolve()
+    if not image_directory.is_dir():
+        raise FileNotFoundError(f"Không tìm thấy folder ảnh: {image_directory}")
+    if directory != image_directory and directory not in image_directory.parents:
+        raise ValueError("Folder ảnh phải nằm trong folder output.")
+    available_names = {
+        path.name
+        for path in image_directory.iterdir()
+        if path.is_file()
+    }
+    selected_pages = []
+    for page in pages:
+        image_name = Path(page["imageName"]).name
+        if image_name not in available_names:
+            continue
+        page["imageName"] = (
+            (image_directory / image_name)
+            .relative_to(directory)
+            .as_posix()
+        )
+        selected_pages.append(page)
+    if not selected_pages:
+        raise FileNotFoundError(
+            f"Không có page nào có ảnh trong: {image_directory}"
+        )
+    return selected_pages
 
 
 class AnnotationRequestHandler(SimpleHTTPRequestHandler):
@@ -108,19 +138,33 @@ def main():
     """Chạy server annotation cục bộ, không khởi tạo OCR hoặc model layout."""
     parser = argparse.ArgumentParser()
     parser.add_argument("output_directory", type=Path)
+    parser.add_argument("--image-directory", type=Path)
     parser.add_argument("--port", type=int, default=8001)
     arguments = parser.parse_args()
     directory = arguments.output_directory.resolve()
     manifest = json.loads(
         (directory / "annotation_manifest.json").read_text(encoding="utf-8"),
     )
+    manifest_pages = manifest["pages"]
+    if arguments.image_directory is not None:
+        manifest_pages = _filter_manifest_pages(
+            manifest_pages,
+            directory,
+            arguments.image_directory,
+        )
+        from annotate_page3 import build_annotation_html
+
+        (directory / "annotate_page3.html").write_text(
+            build_annotation_html(manifest_pages),
+            encoding="utf-8",
+        )
     server = ThreadingHTTPServer(
         ("127.0.0.1", arguments.port),
         partial(AnnotationRequestHandler, directory=str(directory)),
     )
     server.annotation_lock = Lock()
     server.dataset_path = directory / "annotations.json"
-    server.pages = {page["imageName"]: page for page in manifest["pages"]}
+    server.pages = {page["imageName"]: page for page in manifest_pages}
     print(f"Giao diện: http://127.0.0.1:{arguments.port}/", flush=True)
     print(f"Dataset: {server.dataset_path}", flush=True)
     server.serve_forever()

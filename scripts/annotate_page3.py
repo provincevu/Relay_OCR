@@ -1,7 +1,7 @@
 # Mục đích: tạo giao diện annotation CODE/KEY/VALUE từ Rule Induction page 3.
 # Chức năng: tái sử dụng template và thuật toán gốc, bổ sung thao tác annotation.
-# Luồng xử lý: HTML OCR hiện có → snapshot region → giao diện mở rộng.
-# Cấu hình/parameter: thư mục chứa rule_induction.html và các ảnh page 3.
+# Luồng xử lý: HTML OCR hiện có → lọc ảnh tùy chọn → snapshot region → giao diện mở rộng.
+# Cấu hình/parameter: thư mục chứa rule_induction.html và tùy chọn folder ảnh page 3+.
 # Quan hệ: đọc template của test_rule_induction_page3_plus.py và JS mở rộng.
 # Input/output: đọc HTML/OCR; ghi annotate_page3.html và annotation_manifest.json.
 # Contract: giữ nguyên ID, text, box, score của OCR; không chạy lại model OCR.
@@ -53,15 +53,52 @@ def build_annotation_html(pages):
     return template
 
 
+def _filter_pages_by_image_directory(pages, directory, image_directory):
+    """Chỉ giữ page có ảnh còn tồn tại trong folder ảnh được chọn."""
+    image_directory = image_directory.resolve()
+    if not image_directory.is_dir():
+        raise FileNotFoundError(f"Không tìm thấy folder ảnh: {image_directory}")
+    if directory != image_directory and directory not in image_directory.parents:
+        raise ValueError("Folder ảnh phải nằm trong folder output.")
+    available_names = {
+        path.name
+        for path in image_directory.iterdir()
+        if path.is_file()
+    }
+    selected_pages = []
+    for page in pages:
+        image_name = Path(page["imageName"]).name
+        if image_name not in available_names:
+            continue
+        page["imageName"] = (
+            (image_directory / image_name)
+            .relative_to(directory)
+            .as_posix()
+        )
+        selected_pages.append(page)
+    if not selected_pages:
+        raise FileNotFoundError(
+            f"Không có page nào có ảnh trong: {image_directory}"
+        )
+    return selected_pages
+
+
 def main():
     """Tạo giao diện annotation từ đúng snapshot OCR đã dùng trong HTML cũ."""
     parser = argparse.ArgumentParser()
     parser.add_argument("rule_output_directory", type=Path)
+    parser.add_argument("--image-directory", type=Path)
     arguments = parser.parse_args()
     directory = arguments.rule_output_directory.resolve()
     source_html = (directory / "rule_induction.html").read_text(encoding="utf-8")
     pages_source = source_html.split("const pages = ", 1)[1].lstrip()
     pages, _ = json.JSONDecoder().raw_decode(pages_source)
+    if arguments.image_directory is not None:
+        pages = _filter_pages_by_image_directory(
+            pages,
+            directory,
+            arguments.image_directory,
+        )
     for page in pages:
         page["ocrFingerprint"] = hashlib.sha256(
             json.dumps(
