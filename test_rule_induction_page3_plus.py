@@ -1,10 +1,10 @@
-# Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3.
-# Chức năng: cache vị trí page 3, detector, recognition và hiển thị confidence.
-# Luồng xử lý: folder PDF → page cache → render → recognition cache/OCR → HTML.
+# Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3+.
+# Chức năng: render các page vật lý từ 3 trở đi, cache detector/recognition và hiển thị confidence.
+# Luồng xử lý: folder PDF → render page 3+ → recognition cache/OCR → HTML.
 # Cấu hình/parameter: nhận folder chứa PDF; render page ở 400 DPI.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
 # Input/output: đọc PDF; ghi ảnh, các cache và rule_induction.html.
-# Contract: page 3 là page dữ liệu đầu tiên sau page 1 và page ý kiến tùy chọn.
+# Contract: page 3+ là các page vật lý có số từ 3 trở đi.
 
 import argparse
 import hashlib
@@ -17,13 +17,12 @@ from time import perf_counter
 
 import cv2
 
-from scripts.export_pages_3plus import DPI, find_first_data_page
+from scripts.export_pages_3plus import DPI
 from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
 
 
 DETECTOR_CACHE_VERSION = "PP-OCRv6_small_det-v1"
 RECOGNITION_CACHE_VERSION = "page3-plus-recognition-v1"
-PAGE_SELECTION_CACHE_VERSION = "comment-page-structure-v1"
 
 
 class CachedTextDetector:
@@ -75,49 +74,38 @@ class CachedTextDetector:
         return [{"dt_polys": polygons}]
 
 
-def _load_page_selection_cache(cache_path):
-    """Đọc cache vị trí page 3 hoặc trả cache rỗng khi chưa có."""
-    if not cache_path.is_file():
-        return {}
-    return json.loads(cache_path.read_text(encoding="utf-8"))
+def _render_pages_3plus(renderer, pdf_file, output_directory):
+    """Render toàn bộ page vật lý từ page 3 và trả đường dẫn theo số thật."""
+    output_pattern = output_directory / f".{pdf_file.stem}_render_%03d.png"
+    rendered_pattern = f".{pdf_file.stem}_render_*.png"
+    for rendered_path in output_directory.glob(rendered_pattern):
+        rendered_path.unlink()
 
-
-def _find_first_data_page_with_cache(
-    renderer,
-    pdf_file,
-    output_directory,
-    cache,
-    cache_path,
-):
-    """Lấy page 3 từ cache hoặc phân loại lại khi PDF đã thay đổi."""
-    file_status = pdf_file.stat()
-    fingerprint = {
-        "version": PAGE_SELECTION_CACHE_VERSION,
-        "size": file_status.st_size,
-        "modified_ns": file_status.st_mtime_ns,
-    }
-    cached_entry = cache.get(pdf_file.name)
-    if cached_entry and cached_entry["fingerprint"] == fingerprint:
-        return cached_entry["physical_page"], True
-
-    physical_page = find_first_data_page(
+    command = [
         renderer,
-        pdf_file,
-        output_directory,
-    )
-    cache[pdf_file.name] = {
-        "fingerprint": fingerprint,
-        "physical_page": physical_page,
-    }
-    cache_path.write_text(
-        json.dumps(
-            cache,
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return physical_page, False
+        "-q",
+        "-dSAFER",
+        "-dBATCH",
+        "-dNOPAUSE",
+        "-sDEVICE=png16m",
+        f"-r{DPI}",
+        "-dFirstPage=3",
+        f"-sOutputFile={output_pattern}",
+        str(pdf_file),
+    ]
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"Không thể render page 3+: {pdf_file.name}")
+
+    rendered_pages = sorted(output_directory.glob(rendered_pattern))
+    pages = []
+    for page_index, rendered_path in enumerate(rendered_pages, start=3):
+        output_path = output_directory / (
+            f"{pdf_file.stem}_page_{page_index}.png"
+        )
+        rendered_path.replace(output_path)
+        pages.append((page_index, output_path))
+    return pages
 
 
 def parse_arguments():
@@ -2084,7 +2072,7 @@ def build_html(pages):
         regions = page.regions;
         regionById = new Map(regions.map(region => [region.id, region]));
         pageImage.src = page.imageName;
-        pageImage.alt = `Page 3 của ${page.pdfName}`;
+        pageImage.alt = `Page ${page.physicalPage} của ${page.pdfName}`;
         linkLayer.setAttribute(
             "viewBox",
             `0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}`,
@@ -2253,7 +2241,7 @@ def build_html(pages):
     pages.forEach((page, pageIndex) => {
         const option = document.createElement("option");
         option.value = String(pageIndex);
-        option.textContent = page.pdfName;
+        option.textContent = `${page.pdfName} · page ${page.physicalPage}`;
         pageSelect.appendChild(option);
     });
     loadPage(0);
@@ -2268,28 +2256,6 @@ def build_html(pages):
     html = html.replace("__IMAGE_WIDTH__", str(first_page["width"]))
     html = html.replace("__IMAGE_HEIGHT__", str(first_page["height"]))
     return html.replace("__PAGES_JSON__", pages_json)
-
-
-def _render_page(renderer, pdf_path, page_number, output_path):
-    """Render đúng một page vật lý của PDF thành ảnh PNG."""
-    command = [
-        renderer,
-        "-q",
-        "-dSAFER",
-        "-dBATCH",
-        "-dNOPAUSE",
-        "-sDEVICE=png16m",
-        f"-r{DPI}",
-        f"-dFirstPage={page_number}",
-        f"-dLastPage={page_number}",
-        f"-sOutputFile={output_path}",
-        str(pdf_path),
-    ]
-    result = subprocess.run(command, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"Không thể render: {pdf_path.name}")
-    if not output_path.is_file():
-        raise FileNotFoundError(f"Không tạo được ảnh: {output_path}")
 
 
 def _recognize_regions(extractor, image):
@@ -2355,7 +2321,7 @@ def _recognize_regions_with_cache(extractor, image, cache_directory):
 
 
 def main():
-    """Render page 3 của các PDF và tạo một giao diện Rule Induction."""
+    """Render các page 3+ của PDF và tạo một giao diện Rule Induction."""
     arguments = parse_arguments()
     pdf_directory = arguments.pdf_directory
     if not pdf_directory.is_dir():
@@ -2374,10 +2340,6 @@ def main():
 
     output_directory = Path("./output/rule_induction") / pdf_directory.name
     output_directory.mkdir(parents=True, exist_ok=True)
-    page_selection_cache_path = output_directory / "page_selection_cache.json"
-    page_selection_cache = _load_page_selection_cache(
-        page_selection_cache_path
-    )
     print("Đang khởi tạo các model OCR...", flush=True)
     initialization_started = perf_counter()
     extractor = Page3PlusKeyValueExtractor()
@@ -2392,92 +2354,75 @@ def main():
     pages = []
     batch_started = perf_counter()
     total_files = len(pdf_files)
+    processed_pdf_count = 0
 
     for file_index, pdf_file in enumerate(pdf_files, start=1):
-        item_started = perf_counter()
         progress = f"[{file_index}/{total_files}] {pdf_file.name}"
-        print(f"{progress} | Đang xác định page 3...", flush=True)
-        page_selection_started = perf_counter()
-        physical_page, page_cache_hit = _find_first_data_page_with_cache(
+        print(f"{progress} | Đang render các page 3+...", flush=True)
+        render_started = perf_counter()
+        rendered_pages = _render_pages_3plus(
             renderer,
             pdf_file,
             output_directory,
-            page_selection_cache,
-            page_selection_cache_path,
         )
-        page_source = "cache page" if page_cache_hit else "phân loại mới"
-        print(
-            f"{progress} | Xác định page 3 ({page_source}): "
-            f"{perf_counter() - page_selection_started:.3f}s",
-            flush=True,
-        )
-        if physical_page is None:
-            print(f"{progress} | Bỏ qua: không có page 3 ({page_source}).")
+        if not rendered_pages:
+            print(f"{progress} | Bỏ qua: không có page 3+.")
             continue
+        processed_pdf_count += 1
 
-        output_image_path = output_directory / f"{pdf_file.stem}_page_3.png"
         print(
-            f"{progress} | Đang render page vật lý {physical_page} "
-            f"({page_source})...",
+            f"{progress} | Render {len(rendered_pages)} page: "
+            f"{perf_counter() - render_started:.3f}s",
             flush=True,
         )
-        render_started = perf_counter()
-        _render_page(
-            renderer,
-            pdf_file,
-            physical_page,
-            output_image_path,
-        )
-        print(
-            f"{progress} | Render: {perf_counter() - render_started:.3f}s",
-            flush=True,
-        )
-        image_read_started = perf_counter()
-        image = cv2.imread(str(output_image_path))
-        if image is None:
-            raise FileNotFoundError(f"Không đọc được ảnh: {output_image_path}")
-        print(
-            f"{progress} | Đọc ảnh: {perf_counter() - image_read_started:.3f}s",
-            flush=True,
-        )
-
-        print(f"{progress} | Đang đọc cache/chạy recognition...", flush=True)
-        image_height, image_width = image.shape[:2]
-        recognized_regions, recognition_cache_hit = (
-            _recognize_regions_with_cache(
-                extractor,
-                image,
-                output_directory / "recognition_cache",
+        for physical_page, output_image_path in rendered_pages:
+            page_started = perf_counter()
+            print(
+                f"{progress} | Page vật lý {physical_page}: "
+                "đang đọc cache/chạy recognition...",
+                flush=True,
             )
-        )
-        pages.append(
-            {
-                "pdfName": pdf_file.name,
-                "physicalPage": physical_page,
-                "imageName": output_image_path.name,
-                "width": image_width,
-                "height": image_height,
-                "regions": recognized_regions,
-            }
-        )
-        if recognition_cache_hit:
-            recognition_source = "cache recognition"
-        else:
-            detector_source = (
-                "cache detector"
-                if extractor.text_detector.last_cache_hit
-                else "detector mới"
+            image = cv2.imread(str(output_image_path))
+            if image is None:
+                raise FileNotFoundError(
+                    f"Không đọc được ảnh: {output_image_path}"
+                )
+            image_height, image_width = image.shape[:2]
+            recognized_regions, recognition_cache_hit = (
+                _recognize_regions_with_cache(
+                    extractor,
+                    image,
+                    output_directory / "recognition_cache",
+                )
             )
-            recognition_source = f"recognition mới, {detector_source}"
-        print(
-            f"{progress} | Hoàn tất trong "
-            f"{perf_counter() - item_started:.1f}s: page vật lý "
-            f"{physical_page}, {page_source}, {recognition_source}",
-            flush=True,
-        )
+            pages.append(
+                {
+                    "pdfName": pdf_file.name,
+                    "physicalPage": physical_page,
+                    "imageName": output_image_path.name,
+                    "width": image_width,
+                    "height": image_height,
+                    "regions": recognized_regions,
+                }
+            )
+            if recognition_cache_hit:
+                recognition_source = "cache recognition"
+            else:
+                detector_source = (
+                    "cache detector"
+                    if extractor.text_detector.last_cache_hit
+                    else "detector mới"
+                )
+                recognition_source = f"recognition mới, {detector_source}"
+            print(
+                f"{progress} | Page {physical_page} hoàn tất trong "
+                f"{perf_counter() - page_started:.1f}s: "
+                f"{recognition_source}",
+                flush=True,
+            )
 
     if not pages:
-        raise FileNotFoundError("Không có PDF nào chứa page 3.")
+        raise FileNotFoundError("Không có PDF nào chứa page 3+.")
 
     html_path = output_directory / "rule_induction.html"
     html_started = perf_counter()
@@ -2490,7 +2435,8 @@ def main():
         flush=True,
     )
     print(
-        f"Hoàn tất {len(pages)}/{total_files} PDF trong "
+        f"Hoàn tất {len(pages)} page từ "
+        f"{processed_pdf_count}/{total_files} PDF trong "
         f"{perf_counter() - batch_started:.1f}s."
     )
     print(f"HTML Rule Induction: {html_path}")
