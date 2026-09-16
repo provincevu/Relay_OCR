@@ -15,7 +15,7 @@ from pathlib import Path
 from threading import Lock
 
 
-LABELS = {"CODE", "KEY", "VALUE", "HEADER", "OTHER", "UNLABELED"}
+LABELS = {"KEY", "VALUE", "OTHER", "UNLABELED"}
 
 
 def _filter_manifest_pages(pages, directory, image_directory):
@@ -94,18 +94,18 @@ class AnnotationRequestHandler(SimpleHTTPRequestHandler):
                 raise ValueError("Annotation chứa nhãn không hợp lệ.")
             if ("UNLABELED" in roles or "OTHER" in roles) and len(roles) != 1:
                 raise ValueError("OTHER và UNLABELED phải đứng riêng.")
-        linked = {role: set() for role in ["CODE", "KEY", "VALUE"]}
+        linked = {role: set() for role in ["KEY", "VALUE"]}
         for relation in record["relations"]:
+            if relation.get("code_region_ids") not in (None, []):
+                raise ValueError("Dataset mới không hỗ trợ CODE.")
             for role in linked:
                 ids = relation[f"{role.lower()}_region_ids"]
-                if role == "CODE" and ids is None:
-                    continue
                 if not ids or any(role not in annotations[region_id] for region_id in ids):
                     raise ValueError("Relation chứa ID không có nhãn tương ứng.")
                 linked[role].update(ids)
         for role, ids in linked.items():
             if ids != {region_id for region_id, roles in annotations.items() if role in roles}:
-                raise ValueError("CODE/KEY/VALUE phải thuộc một nhóm quan hệ.")
+                raise ValueError("KEY/VALUE phải thuộc một nhóm quan hệ.")
         saved_record = {
             "pdf_name": page["pdfName"],
             "physical_page": page["physicalPage"],

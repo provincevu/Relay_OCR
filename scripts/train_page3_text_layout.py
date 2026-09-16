@@ -1,5 +1,5 @@
 # Mục đích: fine-tune LayoutLMv3 chỉ dùng text + bbox từ annotation page 3.
-# Chức năng: học CODE/KEY/VALUE/HEADER/OTHER và liên kết KEY → VALUE.
+# Chức năng: học KEY/VALUE/OTHER và liên kết KEY → VALUE.
 # Luồng xử lý: phiếu đã xác nhận → mã hóa region → loss có mask → checkpoint.
 # Cấu hình/parameter: python -m scripts.train_page3_text_layout --help.
 # Quan hệ: dùng annotations.json của serve_page3_annotations và model B hiện có.
@@ -24,7 +24,7 @@ from scripts.page3_layout_model import (
 )
 
 
-ROLES = ["CODE", "KEY", "VALUE", "HEADER", "OTHER"]
+ROLES = ["KEY", "VALUE", "OTHER"]
 
 
 def prepare_page(record):
@@ -42,14 +42,23 @@ def masked_training_loss(role_logits, link_logits, page):
     """Bỏ qua region UNLABELED và mọi cạnh có ít nhất một đầu chưa gán nhãn."""
     region_ids = [region["id"] for region in page["regions"]]
     labels = [page["annotations"][region_id] for region_id in region_ids]
+    normalized_labels = []
+    for labels_for_region in labels:
+        labels_set = set(labels_for_region)
+        if (
+            "UNLABELED" not in labels_set
+            and not labels_set.intersection({"KEY", "VALUE", "OTHER"})
+        ):
+            labels_set = {"OTHER"}
+        normalized_labels.append(labels_set)
     known = torch.tensor(
-        ["UNLABELED" not in roles for roles in labels],
+        ["UNLABELED" not in roles for roles in normalized_labels],
         dtype=torch.bool,
         device=role_logits.device,
     )
     role_targets = role_logits.new_tensor([
         [float(role in labels_for_region) for role in ROLES]
-        for labels_for_region in labels
+        for labels_for_region in normalized_labels
     ])
     # Tổng rỗng vẫn có gradient bằng 0 khi toàn bộ trang bị bỏ qua.
     role_losses = torch.nn.functional.binary_cross_entropy_with_logits(
@@ -192,7 +201,7 @@ def main():
         "--link-mode",
         choices=["learned", "row", "both"],
         default="learned",
-        help="Cách tạo liên kết KEY → VALUE; liên kết CODE dùng row-link.",
+        help="Cách tạo liên kết KEY → VALUE.",
     )
     for command in [train_parser, predict_parser]:
         command.add_argument("--device", default="cpu")

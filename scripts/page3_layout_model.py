@@ -4,7 +4,7 @@
 # Cấu hình/parameter: variant A/B, checkpoint encoder, danh sách role.
 # Quan hệ: dùng chung bởi lệnh train và compare trong compare_page3_layout.
 # Input/output: một page OCR → logits [region, role] và [region, region],
-# cùng các liên kết KEY → VALUE, CODE → KEY và CODE → KEY → VALUE.
+# cùng liên kết KEY → VALUE.
 # Contract: A dùng ảnh; B visual_embed=False; cùng tokenizer/head/cách pooling.
 # Contract: không cắt bỏ token cuối trang; cạnh có thể nối region khác chunk.
 
@@ -195,21 +195,6 @@ def row_links(regions, source_role, target_role, source_field, target_field):
     return links
 
 
-def row_chain_links(code_key_links, key_value_links):
-    """Ghép các cạnh CODE → KEY và KEY → VALUE thành bộ ba."""
-    links = []
-    for code_key in code_key_links:
-        for key_value in key_value_links:
-            if code_key["key_region_id"] == key_value["key_region_id"]:
-                links.append({
-                    "code_region_id": code_key["code_region_id"],
-                    "key_region_id": code_key["key_region_id"],
-                    "value_region_id": key_value["value_region_id"],
-                    "score": min(code_key["score"], key_value["score"]),
-                })
-    return links
-
-
 def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
     """Trả vai trò và cạnh region theo learned-link, row-link hoặc cả hai."""
     if link_mode not in {"learned", "row", "both"}:
@@ -248,17 +233,6 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
         "key_region_id",
         "value_region_id",
     )
-    row_code_key_links = row_links(
-        regions,
-        "CODE",
-        "KEY",
-        "code_region_id",
-        "key_region_id",
-    )
-    row_code_key_value_links = row_chain_links(
-        row_code_key_links,
-        row_key_value_links,
-    )
     links_by_mode = {
         "learned": learned_links,
         "row": row_key_value_links,
@@ -270,15 +244,7 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
         "regions": regions,
         "link_mode": link_mode,
         "links": selected_links,
-        "code_key_links": row_code_key_links if link_mode != "learned" else [],
-        "code_key_value_links": (
-            row_code_key_value_links if link_mode != "learned" else []
-        ),
     }
     if link_mode == "both":
         result["links_by_mode"] = links_by_mode
-    result["code_key_links_by_mode"] = {"row": row_code_key_links}
-    result["code_key_value_links_by_mode"] = {
-        "row": row_code_key_value_links,
-    }
     return result

@@ -17,16 +17,14 @@ annotationStyle.textContent = `
     .annotation-toolbar button:disabled{opacity:.45;cursor:not-allowed}
     #groupSummary{width:100%;font-size:14px;color:#334155;line-height:1.5}
     .ocr-box.annotation-selected{outline:4px solid #eab308;outline-offset:3px}
-    .ocr-box.annotation-code{border-color:#dc2626;background:#dc26262b}
-    .ocr-box.annotation-header{border-color:#a16207;background:#a162072b}
     .ocr-box.annotation-unlabeled{border-color:#475569;border-style:dashed;background:#47556945}
     .ocr-box.annotation-other{border-color:#94a3b8;background:#94a3b81a}
     .ocr-box.annotation-frozen-key,.ocr-box.annotation-frozen-value{
         border-color:#64748b;background:#64748b2b;border-style:dotted;opacity:.8}
     .ocr-box.annotation-locked-row{box-shadow:inset 0 0 0 2px #94a3b8;background:#94a3b81a}
-    .logical-box.frozen-key,.logical-box.frozen-value,.logical-box.frozen-code{
+    .logical-box.frozen-key,.logical-box.frozen-value{
         border-color:#64748b;border-style:dotted;opacity:.75}
-    .logical-box.frozen-key span,.logical-box.frozen-value span,.logical-box.frozen-code span{
+    .logical-box.frozen-key span,.logical-box.frozen-value span{
         background:#475569}
     .frozen-link{opacity:.7}
     .swatch.frozen{background:#64748b2b;border-color:#64748b;border-style:dotted}
@@ -35,15 +33,13 @@ annotationStyle.textContent = `
         border-radius:6px;color:#475569;background:#f8fafc;font-size:13px}
     .annotation-drag{position:absolute;border:3px dashed #eab308;background:#facc1526;
         pointer-events:none;z-index:2147483647;display:none}
-    .logical-box.annotation-code{border-color:#dc2626}
-    .logical-box.annotation-code span{background:#dc2626}
     .steps{display:none}.instruction{font-size:14px;padding:8px;margin-bottom:6px}
     .control-panel{padding:12px}.side-panel{top:320px}
     header{padding:14px 24px}.actions{margin-top:6px}
 `;
 document.head.appendChild(annotationStyle);
-document.title = "Annotation CODE · KEY · VALUE";
-document.querySelector("header h1").textContent = "Annotation page 3 · CODE / KEY / VALUE";
+document.title = "Annotation KEY · VALUE";
+document.querySelector("header h1").textContent = "Annotation page 3 · KEY / VALUE";
 document.querySelector("header p").textContent = "Rule Induction từ mẫu; lưu annotation theo ID region.";
 const annotationToolbar = document.createElement("div");
 annotationToolbar.className = "annotation-toolbar";
@@ -52,12 +48,10 @@ annotationToolbar.innerHTML = `
         <option value="sample">Chọn nhóm cho mẫu</option>
         <option value="inspect">Kiểm tra / sửa cặp</option>
         <option value="UNLABELED">Đánh dấu UNLABELED</option>
-        <option value="HEADER">Đánh dấu HEADER</option>
         <option value="OTHER">Đánh dấu OTHER</option>
     </select></label>
     <button id="commitGroup" class="secondary">Chốt nhóm 1</button>
     <button id="inlineGroup" class="secondary">Key-value trong cùng bbox</button>
-    <button id="finishPair" class="confirm">Xác nhận mẫu key-value</button>
     <button id="breakRule" class="secondary">Ngắt rule / Bảng mới</button>
     <button id="applyAnnotation" class="secondary">Gán nhãn</button>
     <button id="clearAnnotation" class="secondary">Gỡ nhãn đã gán</button>
@@ -75,7 +69,6 @@ document.querySelector(".legend").insertAdjacentHTML("beforeend", `
 const modeSelect = document.getElementById("annotationMode");
 const commitButton = document.getElementById("commitGroup");
 const inlineGroupButton = document.getElementById("inlineGroup");
-const finishPairButton = document.getElementById("finishPair");
 const breakRuleButton = document.getElementById("breakRule");
 const applyButton = document.getElementById("applyAnnotation");
 const clearAnnotationButton = document.getElementById("clearAnnotation");
@@ -86,11 +79,11 @@ dragBox.className = "annotation-drag";
 document.getElementById("imageStage").appendChild(dragBox);
 
 function allPairIds(pair) {
-    return [...(pair.code?.regionIds || []), ...pair.key.regionIds, ...pair.value.regionIds];
+    return [...pair.key.regionIds, ...pair.value.regionIds];
 }
 
 function pairRowRange(pair) {
-    const boxes = [pair.code, pair.key, pair.value].filter(Boolean).map(block => block.box);
+    const boxes = [pair.key, pair.value].map(block => block.box);
     const top = Math.min(...boxes.map(box => box[1]));
     const bottom = Math.max(...boxes.map(box => box[3]));
     const padding = Math.max(6, (bottom - top) * 0.35);
@@ -152,7 +145,6 @@ function snapshotAnnotation() {
         labels: annotation.labels, groups: annotation.groups,
         selected: [...annotation.selected], suppressed: [...state.suppressedPairIds],
         suppressionHistory: state.suppressionHistory, confirmed: state.confirmed,
-        autoHeaders: state.autoHeaders, headerProbe: state.headerProbe,
         editing: annotation.editing, dirty: annotation.dirty,
     });
 }
@@ -164,8 +156,6 @@ function restoreAnnotation(snapshot) {
     state.suppressedPairIds = new Set(snapshot.suppressed);
     state.suppressionHistory = snapshot.suppressionHistory;
     state.confirmed = snapshot.confirmed;
-    state.autoHeaders = snapshot.autoHeaders;
-    state.headerProbe = snapshot.headerProbe;
     annotation.labels = snapshot.labels;
     annotation.frozenPairs = snapshot.frozenPairs || [];
     annotation.lockedRows = snapshot.lockedRows || [];
@@ -184,15 +174,10 @@ function rememberAnnotation() {
 function visibleAnnotations(finalize = false) {
     const labels = structuredClone(annotation.labels);
     for (const pair of allPairs()) {
-        for (const role of ["CODE", "KEY", "VALUE"]) {
-            for (const id of pair[role.toLowerCase()]?.regionIds || []) {
+        for (const role of ["KEY", "VALUE"]) {
+            for (const id of pair[role.toLowerCase()].regionIds) {
                 labels[id] = [...new Set([...(labels[id] || []), role])];
             }
-        }
-    }
-    for (const pair of [...state.autoHeaders, ...(state.headerProbe ? [state.headerProbe] : [])]) {
-        for (const id of allPairIds(pair)) {
-            if (!labels[id]) labels[id] = ["HEADER"];
         }
     }
     if (finalize) {
@@ -209,7 +194,6 @@ updateButtons = function () {
     commitButton.disabled = state.confirmed || !isSample || !selectedCount;
     commitButton.textContent = `Chốt nhóm ${groupCount + 1} (hoặc click lại bbox)`;
     inlineGroupButton.disabled = state.confirmed || !isSample || groupCount > 0 || selectedCount !== 1;
-    finishPairButton.disabled = state.confirmed || !isSample || groupCount !== 2 || selectedCount > 0;
     breakRuleButton.disabled = state.confirmed || !state.examples.length || groupCount > 0
         || selectedCount > 0 || Boolean(annotation.editing);
     applyButton.disabled = state.confirmed || isSample || annotation.mode === "inspect" || !selectedCount;
@@ -250,7 +234,7 @@ refreshBoxStyles = function () {
     for (const box of boxLayer.children) {
         const id = box.dataset.regionId;
         const roles = labels[id] || [];
-        for (const role of ["CODE", "KEY", "VALUE", "HEADER", "UNLABELED", "OTHER"]) {
+        for (const role of ["KEY", "VALUE", "UNLABELED", "OTHER"]) {
             box.classList.toggle(`annotation-${role.toLowerCase()}`, roles.includes(role));
         }
         box.classList.toggle("annotation-selected", annotation.selected.has(id) || groupIds.has(id));
@@ -269,10 +253,6 @@ renderLogicalBlocks = function () {
     for (const pair of visibleFrozenPairs()) {
         appendLogicalBox(pair.key, "frozen-key", "KEY đã khóa từ rule trước");
         appendLogicalBox(pair.value, "frozen-value", "VALUE đã khóa từ rule trước");
-        if (pair.code) appendLogicalBox(pair.code, "frozen-code", "CODE đã khóa từ rule trước");
-    }
-    for (const pair of activePairs()) {
-        if (pair.code) appendLogicalBox(pair.code, "annotation-code", "CODE gộp");
     }
 };
 
@@ -280,21 +260,11 @@ renderLinks = function () {
     original.links();
     for (const pair of visibleFrozenPairs()) {
         svgLine(pair, "frozen-link", "#64748b", "6 8");
-        if (pair.code) svgLine({key: pair.code, value: pair.key}, "frozen-link", "#64748b", "6 8");
-    }
-    for (const pair of activePairs()) {
-        if (pair.code) svgLine({key: pair.code, value: pair.key}, "code-link", "#dc2626", "");
     }
 };
 
 pairHtml = function (pair, includeScore, allowRemoval = false) {
     const item = original.pair(pair, includeScore, allowRemoval);
-    if (pair.code) {
-        const code = document.createElement("div");
-        code.textContent = `CODE: ${pair.code.text} (${pair.code.regionIds.join(", ")})`;
-        code.style.color = "#dc2626";
-        item.prepend(code);
-    }
     const ids = document.createElement("div");
     ids.textContent = `${pair.key.regionIds.join(", ")} → ${pair.value.regionIds.join(", ")}`;
     item.appendChild(ids);
@@ -319,7 +289,7 @@ pairHtml = function (pair, includeScore, allowRemoval = false) {
     return item;
 };
 
-// Chạy đúng các hàm suy luận gốc cho từng họ mẫu 2 hoặc 3 nhóm.
+// Chạy suy luận cho một họ mẫu KEY → VALUE.
 recomputePreview = function () {
     if (!state.confirmed) {
         const allRegions = pages[currentPageIndex].regions;
@@ -327,73 +297,28 @@ recomputePreview = function () {
         const frozenIds = new Set(annotation.frozenPairs.filter(
             pair => pairSource(pair) === "manual",
         ).flatMap(allPairIds));
-        const predictions = [];
-        const headers = [];
-        const suspected = new Set();
-        let probe = null;
+        regions = allRegions.filter(region => !annotation.labels[region.id]
+            && !frozenIds.has(region.id) && !isLockedRow(region));
+        state.examples = examples;
         state.rule = null;
         state.inlineRule = null;
-        for (const hasCode of [false, true]) {
-            const family = examples.filter(pair => Boolean(pair.code) === hasCode);
-            if (!family.length) continue;
-            const outside = new Set(examples.filter(pair => !family.includes(pair)).flatMap(allPairIds));
-            const codes = new Set(examples.flatMap(pair => pair.code?.regionIds || []));
-            regions = allRegions.filter(region => !annotation.labels[region.id]
-                && !frozenIds.has(region.id) && !isLockedRow(region)
-                && !outside.has(region.id) && !codes.has(region.id));
-            state.examples = family;
+        state.predictions = [];
+        if (examples.length) {
             state.rule = inferRule();
             state.inlineRule = inferInlineRule();
-            state.predictions = [];
-            state.autoHeaders = [];
-            state.headerProbe = null;
-            state.suspectedHeaderIds = new Set();
             if (state.rule) classifyPredictions(state.rule);
-            const familyHeaders = [...state.autoHeaders];
-            const familyProbe = state.headerProbe;
             const occupied = new Set(examples.flatMap(allPairIds));
-            for (const pair of state.predictions) allPairIds(pair).forEach(id => occupied.add(id));
-            state.predictions.push(...predictInlinePairs(state.inlineRule, occupied));
-            const familyPredictions = state.predictions;
-            if (hasCode) {
-                regions = allRegions.filter(region => !annotation.labels[region.id]
-                    && !frozenIds.has(region.id) && !isLockedRow(region)
-                    && !outside.has(region.id));
-                state.examples = family.map(pair => ({key: pair.code, value: pair.key, mode: "spatial"}));
-                const codeRule = inferRule();
-                const codeCandidates = predictPairs(codeRule).filter(pair =>
-                    !examples.some(example => allPairIds(example).some(id => pair.key.regionIds.includes(id)))
-                );
-                for (const pair of familyPredictions) {
-                    const candidate = codeCandidates.find(codePair =>
-                        codePair.value.regionIds.join("+") === pair.key.regionIds.join("+")
-                        && !codePair.key.regionIds.some(id => pair.value.regionIds.includes(id))
-                    );
-                    if (candidate) {
-                        pair.code = candidate.key;
-                        pair.score = Math.min(pair.score, candidate.score);
-                        predictions.push(pair);
-                    }
-                }
-            } else {
-                predictions.push(...familyPredictions.map(pair => ({...pair, code: null})));
+            for (const pair of state.predictions) {
+                allPairIds(pair).forEach(id => occupied.add(id));
             }
-            headers.push(...familyHeaders);
-            probe ||= familyProbe;
-            state.suspectedHeaderIds.forEach(id => suspected.add(id));
+            state.predictions.push(...predictInlinePairs(state.inlineRule, occupied));
         }
         regions = allRegions;
-        state.examples = examples;
-        state.autoHeaders = headers;
-        state.headerProbe = probe;
-        state.suspectedHeaderIds = suspected;
         const occupied = new Set([
             ...annotation.frozenPairs.filter(pair => pairSource(pair) === "manual"),
             ...examples,
         ].flatMap(allPairIds));
-        const codedPairs = new Set(predictions.filter(pair => pair.code).map(pairInstanceId));
-        state.predictions = predictions.filter(pair => pair.code || !codedPairs.has(pairInstanceId(pair)))
-            .sort((a, b) => b.score - a.score).filter(pair => {
+        state.predictions = state.predictions.sort((a, b) => b.score - a.score).filter(pair => {
             const ids = allPairIds(pair);
             if (ids.some(id => occupied.has(id) || annotation.labels[id])) return false;
             ids.forEach(id => occupied.add(id));
@@ -439,25 +364,22 @@ selectRegion = function (id) {
 
 function finishGroups() {
     const groups = annotation.groups;
-    const hasCode = groups.length === 3;
-    const key = groups[hasCode ? 1 : 0];
-    const value = groups[hasCode ? 2 : 1];
-    let pair = {code: hasCode ? groups[0] : null, key, value, mode: "spatial"};
+    const key = groups[0];
+    const value = groups[1];
+    let pair = {key, value, mode: "spatial"};
     if (key.regionIds.length === 1 && value.regionIds.length === 1) {
         const allRegions = regions;
-        const excluded = new Set([
-            ...(pair.code?.regionIds || []),
-            ...state.examples.flatMap(example => example.code?.regionIds || []),
-        ]);
         const frozenIds = new Set(annotation.frozenPairs.filter(
             pair => pairSource(pair) === "manual",
         ).flatMap(allPairIds));
-        regions = regions.filter(region => !annotation.labels[region.id]
-            && !frozenIds.has(region.id) && !isLockedRow(region)
-            && !excluded.has(region.id));
+        regions = regions.filter(region => (
+            !annotation.labels[region.id]
+            && !frozenIds.has(region.id)
+            && !isLockedRow(region)
+        ));
         const grouped = buildExample(key.regionIds[0], value.regionIds[0]);
         regions = allRegions;
-        if (grouped) pair = {...grouped, code: pair.code};
+        if (grouped) pair = grouped;
     }
     if (annotation.editing) {
         state.suppressedPairIds.delete(pairInstanceId(annotation.editing.pair));
@@ -467,9 +389,7 @@ function finishGroups() {
     annotation.groups = [];
     annotation.selected.clear();
     recomputePreview();
-    instruction.textContent = hasCode
-        ? "Đã tự xác nhận mẫu CODE → KEY → VALUE và cập nhật preview."
-        : "Đã xác nhận mẫu KEY → VALUE; CODE = null. Preview đã cập nhật.";
+    instruction.textContent = "Đã xác nhận mẫu KEY → VALUE và cập nhật preview.";
 }
 
 commitButton.addEventListener("click", () => {
@@ -492,26 +412,17 @@ commitButton.addEventListener("click", () => {
     rememberAnnotation();
     annotation.groups.push(combineRegions(ids.map(id => regionById.get(id))));
     annotation.selected.clear();
-    if (annotation.groups.length === 3) finishGroups();
+    if (annotation.groups.length === 2) finishGroups();
     else {
-        instruction.textContent = annotation.groups.length === 2
-            ? "Bấm Xác nhận mẫu key-value để dùng 2 nhóm; hoặc chọn nhóm 3 để tạo CODE → KEY → VALUE."
-            : "Đã chốt nhóm 1. Chọn các region của nhóm 2 rồi bấm Chốt nhóm.";
+        instruction.textContent = "Đã chốt nhóm 1. Chọn các region của nhóm 2 rồi bấm Chốt nhóm.";
         refreshBoxStyles(); updateSteps(); updateButtons();
     }
 });
-finishPairButton.addEventListener("click", () => { rememberAnnotation(); finishGroups(); });
 breakRuleButton.addEventListener("click", () => {
     rememberAnnotation();
     annotation.lockedRows.push(
         ...[...state.examples, ...state.predictions].map(pairRowRange),
     );
-    const frozenIds = new Set([...state.examples, ...state.predictions].flatMap(allPairIds));
-    for (const pair of [...state.autoHeaders, ...(state.headerProbe ? [state.headerProbe] : [])]) {
-        for (const id of allPairIds(pair)) {
-            if (!frozenIds.has(id) && !annotation.labels[id]) annotation.labels[id] = ["HEADER"];
-        }
-    }
     annotation.frozenPairs.push(
         ...state.examples.map(pair => ({...structuredClone(pair), source: "manual"})),
         ...state.predictions.map(pair => ({...structuredClone(pair), source: "rule"})),
@@ -551,7 +462,7 @@ editPrediction = function (pair) {
     annotation.mode = "sample";
     modeSelect.value = "sample";
     closePredictionPopover(); recomputePreview();
-    instruction.textContent = "Đang sửa: chọn lại đủ 2 hoặc 3 nhóm. Hủy mẫu đang chọn sẽ khôi phục cặp cũ.";
+    instruction.textContent = "Đang sửa: chọn lại đủ 2 nhóm. Hủy mẫu đang chọn sẽ khôi phục cặp cũ.";
 };
 
 cancelCurrentKey = function () {
@@ -601,7 +512,6 @@ confirmInlineSelection = function () {
         annotation.editing = null;
     }
     original.inline();
-    state.examples.at(-1).code = null;
     annotation.selected.clear(); annotation.groups = [];
     recomputePreview();
 };
@@ -647,7 +557,7 @@ modeSelect.addEventListener("change", () => {
     annotation.mode = modeSelect.value;
     updateButtons();
     instruction.textContent = annotation.mode === "sample"
-        ? "Click nhiều bbox hoặc kéo khung, rồi Chốt nhóm. Hai nhóm: xác nhận key-value; ba nhóm: tự xác nhận CODE/KEY/VALUE."
+        ? "Click nhiều bbox hoặc kéo khung, rồi Chốt nhóm. Chọn đủ 2 nhóm KEY/VALUE sẽ tự xác nhận mẫu."
         : annotation.mode === "inspect"
             ? "Bấm bbox hoặc Sửa nhóm trong danh sách để kiểm tra cặp."
             : `Click hoặc kéo khung để chọn region; Shift + kéo để thêm vùng. Bấm Gán ${annotation.mode} để áp dụng.`;
@@ -704,7 +614,7 @@ resetAll = function () {
     annotation.history = []; annotation.editing = null; annotation.frozenPairs = [];
     annotation.lockedRows = []; annotation.dirty = false;
     original.reset();
-    instruction.textContent = "Chọn một hoặc nhiều bbox rồi Chốt nhóm. Hai nhóm: KEY/VALUE; ba nhóm: CODE/KEY/VALUE.";
+    instruction.textContent = "Chọn một hoặc nhiều bbox rồi Chốt nhóm. Hai nhóm KEY/VALUE sẽ tự xác nhận mẫu.";
 };
 
 function pairFromRecord(relation) {
@@ -714,7 +624,6 @@ function pairFromRecord(relation) {
     value.text = relation.value_text;
     return {
         key, value,
-        code: relation.code_region_ids === null ? null : combineRegions(relation.code_region_ids.map(id => regionById.get(id))),
         mode: relation.mode, separator: relation.separator, score: relation.rule_score,
         source: relation.source,
     };
@@ -738,7 +647,7 @@ loadPage = function (pageIndex) {
             throw new Error("Annotation đã lưu thuộc snapshot OCR khác; không được ghép với ID hiện tại.");
         }
         annotation.labels = Object.fromEntries(Object.entries(saved.annotations).filter(
-            ([, labels]) => labels.every(label => ["HEADER", "OTHER", "UNLABELED"].includes(label))
+            ([, labels]) => labels.every(label => ["OTHER", "UNLABELED"].includes(label))
         ));
         state.examples = saved.relations.filter(pair => pair.source === "manual").map(pairFromRecord);
         state.predictions = saved.relations.filter(pair => pair.source === "rule").map(pairFromRecord);
@@ -751,10 +660,10 @@ loadPage = function (pageIndex) {
 function showConfirmedResults() {
     const body = document.getElementById("resultBody");
     body.replaceChildren();
-    document.querySelector("#resultSection thead tr").innerHTML = "<th>#</th><th>CODE</th><th>KEY</th><th>VALUE</th><th>Nguồn</th>";
+    document.querySelector("#resultSection thead tr").innerHTML = "<th>#</th><th>KEY</th><th>VALUE</th><th>Nguồn</th>";
     allPairs().forEach((pair, index) => {
         const row = document.createElement("tr");
-        for (const value of [index + 1, pair.code?.text || "—", pair.key.text, pair.value.text,
+        for (const value of [index + 1, pair.key.text, pair.value.text,
             pairSource(pair) === "manual" ? "Người dùng chọn" : "Suy luận"]) {
             const cell = document.createElement("td"); cell.textContent = value; row.appendChild(cell);
         }
@@ -779,12 +688,12 @@ confirmResults = async function () {
     const labels = visibleAnnotations(true);
     const relations = allPairs().map((pair, index) => ({
         id: `P${index + 1}`,
-        code_region_ids: pair.code?.regionIds || null,
+        code_region_ids: null,
         key_region_ids: [...pair.key.regionIds],
         value_region_ids: [...pair.value.regionIds],
-        code_text: pair.code?.text || null,
+        code_text: null,
         key_text: pair.key.text, value_text: pair.value.text,
-        code_box: pair.code?.box || null, key_box: [...pair.key.box], value_box: [...pair.value.box],
+        code_box: null, key_box: [...pair.key.box], value_box: [...pair.value.box],
         mode: pair.mode || "spatial", separator: pair.separator || "",
         source: pairSource(pair),
         rule_score: pairSource(pair) === "manual" ? null : pair.score,
@@ -800,7 +709,7 @@ confirmResults = async function () {
         if (!response.ok) throw new Error("Server chưa lưu được annotation.");
         annotation.saved[page.imageName] = await response.json();
         annotation.labels = Object.fromEntries(Object.entries(labels).filter(
-            ([, roles]) => roles.every(role => ["OTHER", "UNLABELED", "HEADER"].includes(role))
+            ([, roles]) => roles.every(role => ["OTHER", "UNLABELED"].includes(role))
         ));
         annotation.dirty = false;
         state.confirmed = true;

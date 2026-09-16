@@ -697,7 +697,6 @@ def build_html(pages):
                 <div class="rule-summary" id="ruleSummary">
                     Chưa có rule. Số mẫu không bị giới hạn.
                 </div>
-                <div class="rule-summary" id="headerProbeSummary" hidden></div>
                 <div class="rule-summary" id="suppressionSummary" hidden></div>
             </section>
         </aside>
@@ -734,9 +733,6 @@ def build_html(pages):
         inlineRule: null,
         inlineRegionId: null,
         confirmed: false,
-        headerProbe: null,
-        autoHeaders: [],
-        suspectedHeaderIds: new Set(),
         suppressedPairIds: new Set(),
         suppressionHistory: [],
         hideUnusedRegions: false,
@@ -947,50 +943,6 @@ def build_html(pages):
 
     function pairInstanceId(pair) {
         return `${pair.key.regionIds.join("+")}→${pair.value.regionIds.join("+")}`;
-    }
-
-    function normalizePairText(text) {
-        return text
-            .normalize("NFKC")
-            .toLocaleLowerCase("vi")
-            .replace(/\s+/gu, " ")
-            .replace(/\s*([:;=,])\s*/gu, "$1")
-            .trim();
-    }
-
-    function pairSignature(pair) {
-        return (
-            `${normalizePairText(pair.key.text)}`
-            + `→${normalizePairText(pair.value.text)}`
-        );
-    }
-
-    function hasHeaderStructure(pair) {
-        const pairRegionIds = new Set([
-            ...pair.key.regionIds,
-            ...pair.value.regionIds,
-        ]);
-        const averageHeight = (
-            regionHeight(pair.key) + regionHeight(pair.value)
-        ) / 2;
-        const currentY = pairY(pair);
-        const previousRegions = regions
-            .filter(region => (
-                !pairRegionIds.has(region.id)
-                && centerY(region) < currentY - averageHeight * 0.75
-            ))
-            .sort((left, right) => centerY(right) - centerY(left));
-        if (previousRegions.length === 0) {
-            return false;
-        }
-        const nearestPrevious = previousRegions[0];
-        const isWide = (
-            nearestPrevious.box[2] - nearestPrevious.box[0]
-        ) / PAGE_WIDTH >= 0.30;
-        return (
-            isWide
-            && currentY - centerY(nearestPrevious) <= averageHeight * 3
-        );
     }
 
     function pairFeatures(keyRegion, valueRegion) {
@@ -1384,54 +1336,8 @@ def build_html(pages):
 
     function classifyPredictions(rule) {
         const allPredictions = predictPairs(rule, true);
-        const predictionsAbove = allPredictions
-            .filter(pair => pairY(pair) < rule.startY)
-            .sort((left, right) => pairY(right) - pairY(left));
-        state.headerProbe = predictionsAbove[0] || null;
-
-        const predictionsBelow = allPredictions.filter(pair => (
-            pairY(pair) >= rule.startY
-        ));
-        const pairsBySignature = new Map();
-        for (const pair of predictionsBelow) {
-            const signature = pairSignature(pair);
-            if (!pairsBySignature.has(signature)) {
-                pairsBySignature.set(signature, []);
-            }
-            pairsBySignature.get(signature).push(pair);
-        }
-
-        const automaticHeaderSignatures = new Set();
-        if (state.headerProbe) {
-            automaticHeaderSignatures.add(pairSignature(state.headerProbe));
-        }
-        for (const [signature, pairs] of pairsBySignature.entries()) {
-            if (
-                pairs.length >= 2
-                && pairs.some(pair => hasHeaderStructure(pair))
-            ) {
-                automaticHeaderSignatures.add(signature);
-            }
-        }
-
-        state.autoHeaders = predictionsBelow.filter(pair => (
-            automaticHeaderSignatures.has(pairSignature(pair))
-        ));
-        state.suspectedHeaderIds = new Set();
-        for (const [signature, pairs] of pairsBySignature.entries()) {
-            if (
-                pairs.length >= 2
-                && !automaticHeaderSignatures.has(signature)
-            ) {
-                for (const pair of pairs) {
-                    state.suspectedHeaderIds.add(pairInstanceId(pair));
-                }
-            }
-        }
-
-        state.predictions = predictionsBelow.filter(pair => (
-            !automaticHeaderSignatures.has(pairSignature(pair))
-            && !state.suppressedPairIds.has(pairInstanceId(pair))
+        state.predictions = allPredictions.filter(pair => (
+            !state.suppressedPairIds.has(pairInstanceId(pair))
         ));
     }
 
@@ -1650,12 +1556,6 @@ def build_html(pages):
             );
             item.appendChild(recognitionConfidence);
         }
-        if (state.suspectedHeaderIds.has(pairInstanceId(pair))) {
-            const status = document.createElement("div");
-            status.className = "pair-status";
-            status.textContent = "Nghi là header vì nội dung lặp lại.";
-            item.appendChild(status);
-        }
         if (allowRemoval) {
             const removeButton = document.createElement("button");
             removeButton.type = "button";
@@ -1669,28 +1569,12 @@ def build_html(pages):
     }
 
     function renderSuppressionSummary() {
-        const probeSummary = document.getElementById("headerProbeSummary");
         const suppressionSummary = document.getElementById("suppressionSummary");
-        if (state.headerProbe) {
-            probeSummary.hidden = false;
-            probeSummary.textContent = (
-                `Mẫu tham chiếu phía trên: “${state.headerProbe.key.text}” → `
-                + `“${state.headerProbe.value.text}”. `
-                + "Mẫu này không được đưa vào kết quả."
-            );
-        } else {
-            probeSummary.hidden = true;
-            probeSummary.textContent = "";
-        }
-
         const manualCount = state.suppressedPairIds.size
             - (state.editingPrediction ? 1 : 0);
-        if (state.autoHeaders.length > 0 || manualCount > 0) {
+        if (manualCount > 0) {
             suppressionSummary.hidden = false;
-            suppressionSummary.textContent = (
-                `Đã tự ẩn ${state.autoHeaders.length} header; `
-                + `đã xóa thủ công ${manualCount} cặp.`
-            );
+            suppressionSummary.textContent = `Đã xóa thủ công ${manualCount} cặp.`;
         } else {
             suppressionSummary.hidden = true;
             suppressionSummary.textContent = "";
@@ -1808,9 +1692,6 @@ def build_html(pages):
             classifyPredictions(state.rule);
         } else {
             state.predictions = [];
-            state.headerProbe = null;
-            state.autoHeaders = [];
-            state.suspectedHeaderIds = new Set();
         }
         const occupiedRegionIds = new Set(state.examples.flatMap(example => (
             [...example.key.regionIds, ...example.value.regionIds]
@@ -2065,9 +1946,6 @@ def build_html(pages):
         state.inlineRule = null;
         state.inlineRegionId = null;
         state.confirmed = false;
-        state.headerProbe = null;
-        state.autoHeaders = [];
-        state.suspectedHeaderIds = new Set();
         state.suppressedPairIds = new Set();
         state.suppressionHistory = [];
         state.hideUnusedRegions = false;

@@ -1,4 +1,4 @@
-# Mục đích: tạo giao diện annotation CODE/KEY/VALUE từ Rule Induction page 3.
+# Mục đích: tạo giao diện annotation KEY/VALUE từ Rule Induction page 3.
 # Chức năng: tái sử dụng template và thuật toán gốc, bổ sung thao tác annotation.
 # Luồng xử lý: HTML OCR hiện có → lọc ảnh tùy chọn → snapshot region → giao diện mở rộng.
 # Cấu hình/parameter: thư mục chứa rule_induction.html và tùy chọn folder ảnh page 3+.

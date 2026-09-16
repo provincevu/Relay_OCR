@@ -1,5 +1,5 @@
 # Mục đích: hiển thị kết quả suy luận trang n bằng giao diện chỉ đọc.
-# Chức năng: xem ảnh, bbox OCR, nhãn Layout model và các link CODE–KEY–VALUE.
+# Chức năng: xem ảnh, bbox OCR, nhãn Layout model và link KEY → VALUE.
 # Luồng xử lý: đọc predictions.json → tạo HTML → phục vụ qua HTTP localhost.
 # Cấu hình/parameter: thư mục output và port HTTP.
 # Quan hệ: phục vụ output của infer_page_n_text_layout.py.
@@ -36,10 +36,8 @@ def build_html(dataset):
             --muted: #64748b;
             --border: #cbd5e1;
             --panel: #ffffff;
-            --code: #dc2626;
             --key: #2563eb;
             --value: #16a34a;
-            --header: #a16207;
             --other: #64748b;
         }
         * { box-sizing: border-box; }
@@ -102,10 +100,8 @@ def build_html(dataset):
             position: absolute;
         }
         .region-box:hover, .region-box.selected { box-shadow: 0 0 0 3px #facc15; z-index: 10; }
-        .region-box.code { border-color: var(--code); background: #dc26262b; }
         .region-box.key { border-color: var(--key); background: #2563eb2b; }
         .region-box.value { border-color: var(--value); background: #16a34a2b; }
-        .region-box.header { border-color: var(--header); background: #a162072b; }
         .region-box.other { border-color: var(--other); background: #64748b1a; }
         .region-label {
             background: currentColor;
@@ -119,20 +115,16 @@ def build_html(dataset):
             top: -18px;
             white-space: nowrap;
         }
-        .code .region-label { color: var(--code); }
         .key .region-label { color: var(--key); }
         .value .region-label { color: var(--value); }
-        .header .region-label { color: var(--header); }
         .other .region-label { color: var(--other); }
         .panel { padding: 14px; }
         .panel h2 { font-size: 17px; margin: 0 0 10px; }
         .summary { color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; }
         .legend { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
         .legend span { border-radius: 5px; color: white; font-size: 12px; padding: 4px 6px; }
-        .legend .code { background: var(--code); }
         .legend .key { background: var(--key); }
         .legend .value { background: var(--value); }
-        .legend .header { background: var(--header); }
         .legend .other { background: var(--other); }
         .detail {
             background: #f8fafc;
@@ -167,7 +159,7 @@ def build_html(dataset):
 </head>
 <body>
 <header>
-    <h1>Layout prediction · CODE / KEY / VALUE</h1>
+    <h1>Layout prediction · KEY / VALUE</h1>
     <p>PP-OCR + VietOCR hiệu chỉnh → Layout model → row-link · Chế độ chỉ đọc</p>
 </header>
 <main class="app">
@@ -189,24 +181,14 @@ def build_html(dataset):
             <h2 id="pageTitle">Kết quả</h2>
             <div class="summary" id="summary"></div>
             <div class="legend">
-                <span class="code">CODE</span>
                 <span class="key">KEY</span>
                 <span class="value">VALUE</span>
-                <span class="header">HEADER</span>
                 <span class="other">OTHER</span>
             </div>
             <div class="detail" id="regionDetail">Chọn một bbox để xem chi tiết.</div>
             <div class="link-section">
-                <h3>CODE → KEY</h3>
-                <div class="link-list" id="codeKeyLinks"></div>
-            </div>
-            <div class="link-section">
                 <h3>KEY → VALUE</h3>
                 <div class="link-list" id="keyValueLinks"></div>
-            </div>
-            <div class="link-section">
-                <h3>CODE → KEY → VALUE</h3>
-                <div class="link-list" id="triples"></div>
             </div>
         </aside>
     </div>
@@ -227,7 +209,7 @@ const regionMap = new Map();
 let currentPage = 0;
 
 function primaryLabel(region) {
-    for (const label of ["CODE", "KEY", "VALUE", "HEADER", "OTHER"]) {
+    for (const label of ["KEY", "VALUE", "OTHER"]) {
         if (region.labels.includes(label)) return label;
     }
     return "OTHER";
@@ -309,9 +291,6 @@ function drawLinks(page) {
     clearLinks();
     linkLayer.setAttribute("viewBox", `0 0 ${page.image_width} ${page.image_height}`);
     if (!showLinks.checked) return;
-    for (const link of page.code_key_links || []) {
-        drawLine(link.code_region_id, link.key_region_id, "#dc2626");
-    }
     for (const link of page.links || []) {
         drawLine(link.key_region_id, link.value_region_id, "#2563eb");
     }
@@ -336,20 +315,8 @@ function appendLinkItem(container, text, ids, score) {
 }
 
 function renderLinks(page) {
-    const codeKeyContainer = document.getElementById("codeKeyLinks");
     const keyValueContainer = document.getElementById("keyValueLinks");
-    const triplesContainer = document.getElementById("triples");
-    codeKeyContainer.replaceChildren();
     keyValueContainer.replaceChildren();
-    triplesContainer.replaceChildren();
-    for (const link of page.code_key_links || []) {
-        appendLinkItem(
-            codeKeyContainer,
-            `${link.code_text} [${link.code_region_id}] → ${link.key_text} [${link.key_region_id}]`,
-            [link.code_region_id, link.key_region_id],
-            link.score,
-        );
-    }
     for (const link of page.links || []) {
         appendLinkItem(
             keyValueContainer,
@@ -358,23 +325,11 @@ function renderLinks(page) {
             link.score,
         );
     }
-    for (const link of page.triples || []) {
-        appendLinkItem(
-            triplesContainer,
-            `${link.code_text} [${link.code_region_id}] → `
-                + `${link.key_text} [${link.key_region_id}] → `
-                + `${link.value_text} [${link.value_region_id}]`,
-            [link.code_region_id, link.key_region_id, link.value_region_id],
-            link.score,
-        );
-    }
-    for (const container of [codeKeyContainer, keyValueContainer, triplesContainer]) {
-        if (!container.children.length) {
-            const empty = document.createElement("div");
-            empty.className = "empty";
-            empty.textContent = "Không có kết quả.";
-            container.appendChild(empty);
-        }
+    if (!keyValueContainer.children.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "Không có kết quả.";
+        keyValueContainer.appendChild(empty);
     }
 }
 
@@ -385,8 +340,7 @@ function renderPage(index) {
     pagePosition.textContent = `${index + 1}/${pages.length}`;
     pageTitle.textContent = `${page.pdf_name} · trang ${page.physical_page}`;
     summary.textContent = [
-        `${page.regions.length} region · ${page.code_key_links.length} CODE → KEY`,
-        `${page.links.length} KEY → VALUE · ${page.triples.length} CODE → KEY → VALUE`,
+        `${page.regions.length} region · ${page.links.length} KEY → VALUE`,
         `OCR: ${page.recognition_source}`,
     ].join("\n");
     pageImage.src = page.image_path;

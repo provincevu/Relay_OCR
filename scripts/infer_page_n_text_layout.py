@@ -1,4 +1,4 @@
-# Mục đích: suy luận CODE/KEY/VALUE trên trang vật lý n của nhiều PDF.
+# Mục đích: suy luận KEY/VALUE trên trang vật lý n của nhiều PDF.
 # Chức năng: render trang, chạy PP-OCR + VietOCR hiệu chỉnh, rồi chạy model layout.
 # Luồng xử lý: folder PDF → trang n → detector/recognition cache → Layout model → JSON.
 # Cấu hình/parameter: folder PDF, số trang vật lý, checkpoint, output và device.
@@ -116,46 +116,7 @@ def add_link_texts(prediction):
                 [link["value_region_id"]],
             ),
         })
-    decorated_code_key_links = []
-    for link in prediction["code_key_links"]:
-        decorated_code_key_links.append({
-            **link,
-            "code_text": join_region_text(
-                region_by_id,
-                [link["code_region_id"]],
-            ),
-            "key_text": join_region_text(
-                region_by_id,
-                [link["key_region_id"]],
-            ),
-        })
-    decorated_triples = []
-    for link in prediction["code_key_value_links"]:
-        decorated_triples.append({
-            **link,
-            "code_text": join_region_text(
-                region_by_id,
-                [link["code_region_id"]],
-            ),
-            "key_text": join_region_text(
-                region_by_id,
-                [link["key_region_id"]],
-            ),
-            "value_text": join_region_text(
-                region_by_id,
-                [link["value_region_id"]],
-            ),
-        })
     prediction["links"] = decorated_links
-    prediction["code_key_links"] = decorated_code_key_links
-    prediction["code_key_value_links"] = decorated_triples
-    prediction["code_key_links_by_mode"] = {
-        "row": decorated_code_key_links,
-    }
-    prediction["code_key_value_links_by_mode"] = {
-        "row": decorated_triples,
-    }
-    prediction["triples"] = decorated_triples
     return prediction
 
 
@@ -318,7 +279,7 @@ def main():
         pages.append(prediction)
         print(
             f"{progress} | Hoàn tất {len(prediction['regions'])} region, "
-            f"{len(prediction['triples'])} triple trong "
+            f"{len(prediction['links'])} link KEY → VALUE trong "
             f"{perf_counter() - item_started:.1f}s",
             flush=True,
         )
