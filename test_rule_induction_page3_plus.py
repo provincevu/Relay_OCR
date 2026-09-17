@@ -733,6 +733,7 @@ def build_html(pages):
         inlineRule: null,
         inlineRegionId: null,
         confirmed: false,
+        autoOtherIds: new Set(),
         suppressedPairIds: new Set(),
         suppressionHistory: [],
         hideUnusedRegions: false,
@@ -943,6 +944,45 @@ def build_html(pages):
 
     function pairInstanceId(pair) {
         return `${pair.key.regionIds.join("+")}→${pair.value.regionIds.join("+")}`;
+    }
+
+    function normalizePairText(text) {
+        return text
+            .normalize("NFKC")
+            .toLocaleLowerCase("vi")
+            .replace(/\s+/gu, " ")
+            .replace(/\s*([:;=,])\s*/gu, "$1")
+            .trim();
+    }
+
+    function pairSignature(pair) {
+        return `${normalizePairText(pair.key.text)}→${normalizePairText(pair.value.text)}`;
+    }
+
+    function hasHeaderStructure(pair) {
+        const pairRegionIds = new Set([
+            ...pair.key.regionIds,
+            ...pair.value.regionIds,
+        ]);
+        const averageHeight = (
+            regionHeight(pair.key) + regionHeight(pair.value)
+        ) / 2;
+        const currentY = pairY(pair);
+        const previousRegions = regions
+            .filter(region => (
+                !pairRegionIds.has(region.id)
+                && centerY(region) < currentY - averageHeight * 0.75
+            ))
+            .sort((left, right) => centerY(right) - centerY(left));
+        if (previousRegions.length === 0) return false;
+        const nearestPrevious = previousRegions[0];
+        const isWide = (
+            nearestPrevious.box[2] - nearestPrevious.box[0]
+        ) / PAGE_WIDTH >= 0.30;
+        return (
+            isWide
+            && currentY - centerY(nearestPrevious) <= averageHeight * 3
+        );
     }
 
     function pairFeatures(keyRegion, valueRegion) {
@@ -1336,8 +1376,38 @@ def build_html(pages):
 
     function classifyPredictions(rule) {
         const allPredictions = predictPairs(rule, true);
-        state.predictions = allPredictions.filter(pair => (
-            !state.suppressedPairIds.has(pairInstanceId(pair))
+        const predictionsAbove = allPredictions
+            .filter(pair => pairY(pair) < rule.startY)
+            .sort((left, right) => pairY(right) - pairY(left));
+        const headerProbe = predictionsAbove[0] || null;
+        const predictionsBelow = allPredictions.filter(pair => (
+            pairY(pair) >= rule.startY
+        ));
+        const pairsBySignature = new Map();
+        for (const pair of predictionsBelow) {
+            const signature = pairSignature(pair);
+            if (!pairsBySignature.has(signature)) {
+                pairsBySignature.set(signature, []);
+            }
+            pairsBySignature.get(signature).push(pair);
+        }
+        const automaticHeaderSignatures = new Set();
+        if (headerProbe) automaticHeaderSignatures.add(pairSignature(headerProbe));
+        for (const [signature, pairs] of pairsBySignature.entries()) {
+            if (pairs.length >= 2 && pairs.some(hasHeaderStructure)) {
+                automaticHeaderSignatures.add(signature);
+            }
+        }
+        const autoOtherPairs = [
+            ...(headerProbe ? [headerProbe] : []),
+            ...predictionsBelow.filter(pair => (
+                automaticHeaderSignatures.has(pairSignature(pair))
+            )),
+        ];
+        state.autoOtherIds = new Set(autoOtherPairs.flatMap(allPairIds));
+        state.predictions = predictionsBelow.filter(pair => (
+            !automaticHeaderSignatures.has(pairSignature(pair))
+            && !state.suppressedPairIds.has(pairInstanceId(pair))
         ));
     }
 
@@ -1572,9 +1642,12 @@ def build_html(pages):
         const suppressionSummary = document.getElementById("suppressionSummary");
         const manualCount = state.suppressedPairIds.size
             - (state.editingPrediction ? 1 : 0);
-        if (manualCount > 0) {
+        if (state.autoOtherIds.size > 0 || manualCount > 0) {
             suppressionSummary.hidden = false;
-            suppressionSummary.textContent = `Đã xóa thủ công ${manualCount} cặp.`;
+            suppressionSummary.textContent = (
+                `Đã loại ${state.autoOtherIds.size} region header khỏi suy luận `
+                + `và gán OTHER; đã xóa thủ công ${manualCount} cặp.`
+            );
         } else {
             suppressionSummary.hidden = true;
             suppressionSummary.textContent = "";
@@ -1616,8 +1689,8 @@ def build_html(pages):
         const descriptions = [];
         if (state.rule) {
             descriptions.push(
-                `Rule hai cột từ ${state.rule.sampleCount} mẫu, có một probe `
-                + "phía trên không đưa vào kết quả",
+                `Rule hai cột từ ${state.rule.sampleCount} mẫu; `
+                + "vùng header được loại khỏi preview và xem là OTHER",
             );
         }
         if (state.inlineRule) {
@@ -1692,6 +1765,7 @@ def build_html(pages):
             classifyPredictions(state.rule);
         } else {
             state.predictions = [];
+            state.autoOtherIds = new Set();
         }
         const occupiedRegionIds = new Set(state.examples.flatMap(example => (
             [...example.key.regionIds, ...example.value.regionIds]
@@ -1946,6 +2020,7 @@ def build_html(pages):
         state.inlineRule = null;
         state.inlineRegionId = null;
         state.confirmed = false;
+        state.autoOtherIds = new Set();
         state.suppressedPairIds = new Set();
         state.suppressionHistory = [];
         state.hideUnusedRegions = false;

@@ -180,6 +180,9 @@ function visibleAnnotations(finalize = false) {
             }
         }
     }
+    for (const id of state.autoOtherIds) {
+        if (!labels[id]) labels[id] = ["OTHER"];
+    }
     if (finalize) {
         for (const region of regions) labels[region.id] ||= ["OTHER"];
     }
@@ -297,6 +300,7 @@ recomputePreview = function () {
         const frozenIds = new Set(annotation.frozenPairs.filter(
             pair => pairSource(pair) === "manual",
         ).flatMap(allPairIds));
+        state.autoOtherIds = new Set();
         regions = allRegions.filter(region => !annotation.labels[region.id]
             && !frozenIds.has(region.id) && !isLockedRow(region));
         state.examples = examples;
@@ -320,7 +324,9 @@ recomputePreview = function () {
         ].flatMap(allPairIds));
         state.predictions = state.predictions.sort((a, b) => b.score - a.score).filter(pair => {
             const ids = allPairIds(pair);
-            if (ids.some(id => occupied.has(id) || annotation.labels[id])) return false;
+            if (ids.some(id => occupied.has(id)
+                || annotation.labels[id]
+                || state.autoOtherIds.has(id))) return false;
             ids.forEach(id => occupied.add(id));
             return true;
         }).sort((a, b) => pairY(a) - pairY(b));
@@ -343,6 +349,10 @@ selectRegion = function (id) {
     const region = regionById.get(id);
     if (annotation.mode === "sample" && isLockedRow(region)) {
         instruction.textContent = "Hàng Y này đã thuộc rule trước và đang bị khóa; hãy chọn mẫu ở hàng khác.";
+        return;
+    }
+    if (annotation.mode === "sample" && state.autoOtherIds.has(id)) {
+        instruction.textContent = "Region header đã được nhận diện là OTHER; không dùng làm mẫu suy luận.";
         return;
     }
     if (annotation.mode === "inspect") {
@@ -400,6 +410,7 @@ commitButton.addEventListener("click", () => {
         ...annotation.groups.flatMap(group => group.regionIds),
     ]);
     if (ids.some(id => activeUsed.has(id) || annotation.labels[id]
+        || state.autoOtherIds.has(id)
         || isLockedRow(regionById.get(id)))) {
         if (ids.some(id => isLockedRow(regionById.get(id)))) {
             instruction.textContent = "Hàng Y này đã thuộc rule trước và đang bị khóa; hãy chọn mẫu ở hàng khác.";
@@ -423,6 +434,9 @@ breakRuleButton.addEventListener("click", () => {
     annotation.lockedRows.push(
         ...[...state.examples, ...state.predictions].map(pairRowRange),
     );
+    for (const id of state.autoOtherIds) {
+        if (!annotation.labels[id]) annotation.labels[id] = ["OTHER"];
+    }
     annotation.frozenPairs.push(
         ...state.examples.map(pair => ({...structuredClone(pair), source: "manual"})),
         ...state.predictions.map(pair => ({...structuredClone(pair), source: "rule"})),
