@@ -8,9 +8,16 @@
 
 import argparse
 import json
+import sys
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+if __package__:
+    from .page_n_prediction_filter import filter_prediction_links
+else:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from page_n_prediction_filter import filter_prediction_links
 
 
 HOST = "127.0.0.1"
@@ -19,7 +26,11 @@ PORT = 8002
 
 def build_html(dataset):
     """Tạo giao diện chỉ đọc từ predictions.json."""
-    pages_json = json.dumps(dataset["pages"], ensure_ascii=False).replace(
+    pages = [
+        filter_prediction_links(page)
+        for page in dataset["pages"]
+    ]
+    pages_json = json.dumps(pages, ensure_ascii=False).replace(
         "</",
         "<\\/",
     )
@@ -160,7 +171,7 @@ def build_html(dataset):
 <body>
 <header>
     <h1>Layout prediction · KEY / VALUE · page 3+</h1>
-    <p>PP-OCR + VietOCR hiệu chỉnh → Layout model → row-link · Chế độ chỉ đọc</p>
+    <p>PP-OCR + VietOCR hiệu chỉnh → Layout model → row-link; value ở bên phải key · Chế độ chỉ đọc</p>
 </header>
 <main class="app">
     <div class="toolbar">

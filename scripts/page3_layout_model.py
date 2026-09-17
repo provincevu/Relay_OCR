@@ -4,7 +4,7 @@
 # Cấu hình/parameter: variant A/B, checkpoint encoder, danh sách role.
 # Quan hệ: dùng chung bởi lệnh train và compare trong compare_page3_layout.
 # Input/output: một page OCR → logits [region, role] và [region, region],
-# cùng liên kết KEY → VALUE.
+# cùng liên kết KEY → VALUE; value phải nằm bên phải key.
 # Contract: A dùng ảnh; B visual_embed=False; cùng tokenizer/head/cách pooling.
 # Contract: không cắt bỏ token cuối trang; cạnh có thể nối region khác chunk.
 
@@ -19,6 +19,8 @@ from transformers import (
     LayoutLMv3Model,
     LayoutLMv3TokenizerFast,
 )
+
+from .page_n_prediction_filter import filter_prediction_links
 
 
 class Page3LayoutModel(nn.Module):
@@ -247,4 +249,4 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
     }
     if link_mode == "both":
         result["links_by_mode"] = links_by_mode
-    return result
+    return filter_prediction_links(result)
