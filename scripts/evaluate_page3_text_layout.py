@@ -1,5 +1,5 @@
-# Mục đích: đánh giá checkpoint LayoutLMv3 text + bbox trên dataset annotation.
-# Chức năng: đo nhận diện KEY/VALUE và các liên kết KEY → VALUE.
+# Mục đích: đánh giá checkpoint LayoutLMv3 text + bbox trên dataset page 3+.
+# Chức năng: đo nhận diện KEY/VALUE/OTHER và các liên kết KEY → VALUE.
 # Luồng xử lý: tải checkpoint → dự đoán từng phiếu → so sánh region/cạnh với nhãn thật → ghi metric.
 # Cấu hình/parameter: dataset, checkpoint, device, threshold và output nhận từ command line.
 # Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.train_page3_text_layout.
@@ -21,7 +21,7 @@ from scripts.page3_layout_model import (
 from scripts.train_page3_text_layout import prepare_page
 
 
-EVALUATED_ROLES = ["KEY", "VALUE"]
+EVALUATED_ROLES = ["KEY", "VALUE", "OTHER"]
 
 
 def set_counts(gold, predicted):
@@ -50,6 +50,14 @@ def metric_from_counts(true_positive, false_positive, false_negative):
         "recall": recall,
         "f1": f1,
     }
+
+
+def normalize_prediction_labels(labels):
+    """Giữ OTHER riêng với KEY hoặc VALUE giống pipeline predict."""
+    labels = set(labels)
+    if labels.intersection({"KEY", "VALUE"}):
+        labels.discard("OTHER")
+    return labels or {"OTHER"}
 
 
 def load_model(checkpoint_directory, device):
@@ -111,7 +119,7 @@ def evaluate(arguments):
                 arguments.link_mode,
             )
             predicted_labels = {
-                region["id"]: set(region["labels"])
+                region["id"]: normalize_prediction_labels(region["labels"])
                 for region in prediction["regions"]
             }
             for role in EVALUATED_ROLES:
@@ -198,7 +206,7 @@ def evaluate(arguments):
 def main():
     """Đọc tham số và chạy đánh giá checkpoint."""
     parser = argparse.ArgumentParser(
-        description="Đánh giá LayoutLMv3 text + bbox theo region và liên kết."
+        description="Đánh giá LayoutLMv3 text + bbox trên dataset page 3+.",
     )
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -207,8 +215,8 @@ def main():
     parser.add_argument(
         "--link-mode",
         choices=["learned", "row", "both"],
-        default="learned",
-        help="Cách tạo liên kết KEY → VALUE.",
+        default="row",
+        help="Cách tạo liên kết KEY → VALUE; mặc định dùng row-link.",
     )
     parser.add_argument("--device", default="cpu")
     arguments = parser.parse_args()
