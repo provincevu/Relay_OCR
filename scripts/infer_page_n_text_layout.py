@@ -1,22 +1,21 @@
-# Mục đích: suy luận KEY/VALUE trên trang vật lý n của nhiều PDF.
-# Chức năng: render trang, chạy PP-OCR + VietOCR hiệu chỉnh, rồi chạy model layout.
-# Luồng xử lý: folder PDF → trang n → detector/recognition cache → Layout model → JSON.
-# Cấu hình/parameter: folder PDF, số trang vật lý, checkpoint, output và device.
-# Quan hệ: tái sử dụng Page3PlusKeyValueExtractor và predict_page hiện có.
-# Input/output: đọc PDF; ghi ảnh trang, cache detector/recognition và predictions.json.
-# Contract: trang n đánh số từ 1; trang không tồn tại bị bỏ qua; link mặc định là row-link.
+# Mục đích: suy luận KEY/VALUE trên toàn bộ page vật lý từ page 3 trở đi.
+# Chức năng: render page 3+, chạy PP-OCR + VietOCR hiệu chỉnh, rồi chạy model layout.
+# Luồng xử lý: folder PDF → render page 3+ → detector/recognition cache → Layout model → JSON.
+# Cấu hình/parameter: folder PDF, checkpoint, output, threshold và device nhận từ command line.
+# Quan hệ: dùng cùng luồng render/OCR của test_rule_induction_page3_plus.py.
+# Input/output: đọc PDF; ghi ảnh page 3+, cache detector/recognition và predictions.json.
+# Contract: page 3+ là page vật lý có số từ 3 trở đi; link mặc định là row-link.
 
 import argparse
 import json
 import shutil
-import subprocess
 from pathlib import Path
 from time import perf_counter
 
-import cv2
 import torch
 from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3TokenizerFast
 
+from scripts.export_pages_3plus import DPI
 from scripts.page3_layout_model import (
     Page3LayoutModel,
     encode_page,
@@ -24,38 +23,10 @@ from scripts.page3_layout_model import (
 )
 from scripts.train_page3_text_layout import prepare_page
 from test_rule_induction_page3_plus import (
-    CachedTextDetector,
-    _recognize_regions_with_cache,
+    _create_extractor,
+    _process_image,
+    _render_pages_3plus,
 )
-from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
-
-
-DPI = 400
-
-
-def render_physical_page(renderer, pdf_path, page_number, output_path):
-    """Render một trang vật lý; trả False nếu PDF không có trang đó."""
-    temporary_path = output_path.with_suffix(".tmp.png")
-    if temporary_path.is_file():
-        temporary_path.unlink()
-    command = [
-        renderer,
-        "-q",
-        "-dSAFER",
-        "-dBATCH",
-        "-dNOPAUSE",
-        "-sDEVICE=png16m",
-        f"-r{DPI}",
-        f"-dFirstPage={page_number}",
-        f"-dLastPage={page_number}",
-        f"-sOutputFile={temporary_path}",
-        str(pdf_path),
-    ]
-    subprocess.run(command, check=False)
-    if not temporary_path.is_file():
-        return False
-    temporary_path.replace(output_path)
-    return True
 
 
 def load_layout_model(checkpoint_directory, device):
@@ -88,7 +59,7 @@ def sort_regions(regions):
 
 
 def join_region_text(region_by_id, region_ids):
-    """Ghép text của các region theo tọa độ mà vẫn giữ danh sách ID."""
+    """Ghép text của các region theo tọa độ và giữ ID region trong link."""
     regions = [region_by_id[region_id] for region_id in region_ids]
     return " ".join(
         region["text"].strip()
@@ -98,14 +69,13 @@ def join_region_text(region_by_id, region_ids):
 
 
 def add_link_texts(prediction):
-    """Thêm text dẫn xuất vào link nhưng giữ nguyên ID region làm dữ liệu chính."""
+    """Thêm text dẫn xuất vào link nhưng giữ region ID làm dữ liệu chính."""
     region_by_id = {
         region["id"]: region
         for region in prediction["regions"]
     }
-    decorated_links = []
-    for link in prediction["links"]:
-        decorated_links.append({
+    prediction["links"] = [
+        {
             **link,
             "key_text": join_region_text(
                 region_by_id,
@@ -115,50 +85,25 @@ def add_link_texts(prediction):
                 region_by_id,
                 [link["value_region_id"]],
             ),
-        })
-    prediction["links"] = decorated_links
+        }
+        for link in prediction["links"]
+    ]
     return prediction
 
 
 def infer_page(
-    pdf_path,
-    page_number,
-    renderer,
-    output_directory,
+    page_record,
     model,
     tokenizer,
     roles,
     device,
     threshold,
-    extractor,
 ):
-    """Render, OCR và suy luận một PDF; trả None nếu thiếu trang n."""
-    image_directory = output_directory / "images"
-    image_directory.mkdir(parents=True, exist_ok=True)
-    image_path = image_directory / f"{pdf_path.stem}_page_{page_number}.png"
-    if not render_physical_page(
-        renderer,
-        pdf_path,
-        page_number,
-        image_path,
-    ):
-        return None
-
-    image = cv2.imread(str(image_path))
-    if image is None:
-        raise FileNotFoundError(f"Không đọc được ảnh: {image_path}")
-    image_height, image_width = image.shape[:2]
-    recognized_regions, recognition_cache_hit = (
-        _recognize_regions_with_cache(
-            extractor,
-            image,
-            output_directory / "recognition_cache",
-        )
-    )
+    """Chạy Layout model trên một page đã được OCR."""
     page = prepare_page({
-        "image_width": image_width,
-        "image_height": image_height,
-        "regions": recognized_regions,
+        "image_width": page_record["width"],
+        "image_height": page_record["height"],
+        "regions": page_record["regions"],
     })
     encoded = encode_page(
         page,
@@ -178,34 +123,40 @@ def infer_page(
         )
     ocr_scores = {
         region["id"]: region["score"]
-        for region in recognized_regions
+        for region in page_record["regions"]
     }
     for region in prediction["regions"]:
         region["ocr_score"] = ocr_scores[region["id"]]
     prediction = add_link_texts(prediction)
     prediction.update({
-        "pdf_name": pdf_path.name,
-        "physical_page": page_number,
-        "image_name": image_path.name,
-        "image_path": image_path.relative_to(output_directory).as_posix(),
-        "image_width": image_width,
-        "image_height": image_height,
-        "recognition_source": (
-            "cache recognition"
-            if recognition_cache_hit
-            else "PP-OCR + VietOCR hiệu chỉnh"
-        ),
+        "pdf_name": page_record["pdfName"],
+        "physical_page": page_record["physicalPage"],
+        "image_name": page_record["imageName"],
+        "image_path": page_record["imageName"],
+        "image_width": page_record["width"],
+        "image_height": page_record["height"],
     })
     return prediction
 
 
+def recognition_source(extractor, cache_hit):
+    """Mô tả nguồn recognition theo cache detector/recognition hiện tại."""
+    if cache_hit:
+        return "cache recognition"
+    detector_source = (
+        "cache detector"
+        if extractor.text_detector.last_cache_hit
+        else "detector mới"
+    )
+    return f"recognition mới, {detector_source}"
+
+
 def parse_arguments():
-    """Đọc tham số folder PDF và trang vật lý cần suy luận."""
+    """Đọc folder PDF và các tham số suy luận page 3+."""
     parser = argparse.ArgumentParser(
-        description="Suy luận Layout model trên trang vật lý n của các PDF.",
+        description="Suy luận Layout model trên toàn bộ page vật lý 3+.",
     )
     parser.add_argument("--pdf-directory", type=Path, required=True)
-    parser.add_argument("--page-number", type=int, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--threshold", type=float, default=0.5)
@@ -214,10 +165,8 @@ def parse_arguments():
 
 
 def main():
-    """Chạy detector, recognition và Layout model trên các trang đã chọn."""
+    """Render, OCR và suy luận tuần tự trên mọi page 3+ của folder PDF."""
     arguments = parse_arguments()
-    if arguments.page_number < 1:
-        raise ValueError("--page-number phải bắt đầu từ 1.")
     if not arguments.pdf_directory.is_dir():
         raise FileNotFoundError(
             f"Không tìm thấy folder PDF: {arguments.pdf_directory}"
@@ -235,12 +184,10 @@ def main():
         raise FileNotFoundError("Không tìm thấy gswin64c trong PATH.")
 
     arguments.output.mkdir(parents=True, exist_ok=True)
+    image_directory = arguments.output / "images"
+    image_directory.mkdir(parents=True, exist_ok=True)
     print("Đang khởi tạo PP-OCR, VietOCR và Layout model...", flush=True)
-    extractor = Page3PlusKeyValueExtractor()
-    extractor.text_detector = CachedTextDetector(
-        extractor.text_detector,
-        arguments.output / "detector_cache",
-    )
+    extractor = _create_extractor(arguments.output)
     model, tokenizer, roles = load_layout_model(
         arguments.checkpoint,
         arguments.device,
@@ -249,48 +196,60 @@ def main():
     pages = []
     total_started = perf_counter()
     total_files = len(pdf_files)
+    processed_pages = 0
     for file_index, pdf_path in enumerate(pdf_files, start=1):
         progress = f"[{file_index}/{total_files}] {pdf_path.name}"
-        item_started = perf_counter()
-        print(
-            f"{progress} | Đang xử lý trang vật lý "
-            f"{arguments.page_number}...",
-            flush=True,
-        )
-        prediction = infer_page(
-            pdf_path,
-            arguments.page_number,
+        print(f"{progress} | Đang render các page 3+...", flush=True)
+        rendered_pages = _render_pages_3plus(
             renderer,
-            arguments.output,
-            model,
-            tokenizer,
-            roles,
-            arguments.device,
-            arguments.threshold,
-            extractor,
+            pdf_path,
+            image_directory,
         )
-        if prediction is None:
+        if not rendered_pages:
+            print(f"{progress} | Bỏ qua: không có page 3+.", flush=True)
+            continue
+
+        for physical_page, image_path in rendered_pages:
+            page_started = perf_counter()
             print(
-                f"{progress} | Bỏ qua: không có trang "
-                f"{arguments.page_number}.",
+                f"{progress} | Page vật lý {physical_page}: "
+                "đang đọc cache/chạy recognition...",
                 flush=True,
             )
-            continue
-        pages.append(prediction)
-        print(
-            f"{progress} | Hoàn tất {len(prediction['regions'])} region, "
-            f"{len(prediction['links'])} link KEY → VALUE trong "
-            f"{perf_counter() - item_started:.1f}s",
-            flush=True,
-        )
+            page_record, cache_hit = _process_image(
+                extractor,
+                image_path,
+                arguments.output,
+                pdf_path.name,
+                physical_page,
+            )
+            prediction = infer_page(
+                page_record,
+                model,
+                tokenizer,
+                roles,
+                arguments.device,
+                arguments.threshold,
+            )
+            prediction["recognition_source"] = recognition_source(
+                extractor,
+                cache_hit,
+            )
+            pages.append(prediction)
+            processed_pages += 1
+            print(
+                f"{progress} | Page {physical_page} hoàn tất: "
+                f"{len(prediction['regions'])} region, "
+                f"{len(prediction['links'])} link KEY → VALUE trong "
+                f"{perf_counter() - page_started:.1f}s",
+                flush=True,
+            )
 
     if not pages:
-        raise FileNotFoundError(
-            f"Không có PDF nào chứa trang {arguments.page_number}."
-        )
+        raise FileNotFoundError("Không có PDF nào chứa page 3+.")
     result = {
         "schema_version": 1,
-        "page_number": arguments.page_number,
+        "page_range": "3+",
         "dpi": DPI,
         "link_mode": "row",
         "threshold": arguments.threshold,
@@ -305,8 +264,8 @@ def main():
         encoding="utf-8",
     )
     print(
-        f"Đã lưu {len(pages)}/{total_files} PDF: {output_path} "
-        f"({perf_counter() - total_started:.1f}s)",
+        f"Đã lưu {processed_pages} page 3+ từ {total_files} PDF: "
+        f"{output_path} ({perf_counter() - total_started:.1f}s)",
         flush=True,
     )
 
