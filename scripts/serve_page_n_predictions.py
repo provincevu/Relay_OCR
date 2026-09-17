@@ -1,8 +1,8 @@
-# Mục đích: hiển thị kết quả suy luận trang n bằng giao diện chỉ đọc.
+# Mục đích: hiển thị kết quả suy luận page 3+ bằng giao diện chỉ đọc.
 # Chức năng: xem ảnh, bbox OCR, nhãn Layout model và link KEY → VALUE.
 # Luồng xử lý: đọc predictions.json → tạo HTML → phục vụ qua HTTP localhost.
 # Cấu hình/parameter: thư mục output và port HTTP.
-# Quan hệ: phục vụ output của infer_page_n_text_layout.py.
+# Quan hệ: phục vụ output page 3+ của infer_page_n_text_layout.py.
 # Input/output: đọc predictions.json và ảnh; ghi predictions.html tạm thời.
 # Contract: không có API POST và không sửa predictions.json hoặc annotations.json.
 
@@ -28,7 +28,7 @@ def build_html(dataset):
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Layout prediction page n</title>
+    <title>Layout prediction page 3+</title>
     <style>
         :root {
             --background: #f1f5f9;
@@ -159,12 +159,12 @@ def build_html(dataset):
 </head>
 <body>
 <header>
-    <h1>Layout prediction · KEY / VALUE</h1>
+    <h1>Layout prediction · KEY / VALUE · page 3+</h1>
     <p>PP-OCR + VietOCR hiệu chỉnh → Layout model → row-link · Chế độ chỉ đọc</p>
 </header>
 <main class="app">
     <div class="toolbar">
-        <label for="pageSelect">Phiếu:</label>
+        <label for="pageSelect">Page:</label>
         <select id="pageSelect"></select>
         <span id="pagePosition"></span>
         <label><input id="showBoxes" type="checkbox" checked> Bbox</label>
@@ -343,7 +343,7 @@ function renderPage(index) {
         `${page.regions.length} region · ${page.links.length} KEY → VALUE`,
         `OCR: ${page.recognition_source}`,
     ].join("\n");
-    pageImage.src = page.image_path;
+    pageImage.src = page.image_path || page.image_name;
     stage.style.aspectRatio = `${page.image_width} / ${page.image_height}`;
     renderRegions(page);
     renderLinks(page);
