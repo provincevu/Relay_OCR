@@ -1,6 +1,6 @@
 # Mục đích: lọc link KEY → VALUE theo quy tắc value nằm bên phải key hoặc inline.
-# Chức năng: loại link sai, giữ inline KEY/VALUE và đổi value không còn link hợp lệ thành OTHER.
-# Luồng xử lý: nhận prediction → lọc từng nhóm link → cập nhật nhãn region.
+# Chức năng: lọc link, giữ inline KEY/VALUE và hỗ trợ output chỉ gồm region đã ghép cặp.
+# Luồng xử lý: nhận prediction → lọc từng nhóm link → tùy chọn lọc nhãn không có cặp.
 # Cấu hình/parameter: so sánh tâm bbox theo trục X; cùng region được xem là inline.
 # Quan hệ: dùng chung bởi Page3LayoutModel, viewer và script sửa predictions.json.
 # Input/output: nhận một prediction dict và cập nhật trực tiếp dict đó.
@@ -60,4 +60,27 @@ def filter_prediction_links(prediction):
     for region in prediction["regions"]:
         if region["id"] in rejected_value_ids - valid_value_ids:
             region["labels"] = ["OTHER"]
+    return prediction
+
+
+def filter_unlinked_regions(prediction):
+    """Đổi KEY/VALUE không có link trong output đã chọn thành OTHER."""
+    linked_key_ids = {
+        link["key_region_id"]
+        for link in prediction.get("links", [])
+    }
+    linked_value_ids = {
+        link["value_region_id"]
+        for link in prediction.get("links", [])
+    }
+    for region in prediction["regions"]:
+        labels = set(region.get("labels", []))
+        if "KEY" in labels and region["id"] not in linked_key_ids:
+            labels.discard("KEY")
+        if "VALUE" in labels and region["id"] not in linked_value_ids:
+            labels.discard("VALUE")
+        region["labels"] = [
+            role for role in ["KEY", "VALUE"]
+            if role in labels
+        ] or ["OTHER"]
     return prediction

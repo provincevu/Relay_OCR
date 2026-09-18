@@ -21,6 +21,7 @@ from scripts.page3_layout_model import (
     encode_page,
     predict_page,
 )
+from scripts.page_n_prediction_filter import filter_unlinked_regions
 from scripts.train_page3_text_layout import prepare_page
 from test_rule_induction_page3_plus import (
     _create_extractor,
@@ -128,6 +129,7 @@ def infer_page(
     for region in prediction["regions"]:
         region["ocr_score"] = ocr_scores[region["id"]]
     prediction = add_link_texts(prediction)
+    prediction = filter_unlinked_regions(prediction)
     prediction.update({
         "pdf_name": page_record["pdfName"],
         "physical_page": page_record["physicalPage"],
