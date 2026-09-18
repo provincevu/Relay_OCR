@@ -50,6 +50,7 @@ def build_html(dataset):
             --key: #2563eb;
             --value: #16a34a;
             --other: #64748b;
+            --inline: #7c3aed;
         }
         * { box-sizing: border-box; }
         body {
@@ -116,6 +117,7 @@ def build_html(dataset):
         .region-box.key { border-color: var(--key); background: #2563eb2b; }
         .region-box.value { border-color: var(--value); background: #16a34a2b; }
         .region-box.other { border-color: var(--other); background: #64748b1a; }
+        .region-box.inline { border-color: var(--inline); background: #7c3aed2b; }
         .region-label {
             background: currentColor;
             color: white;
@@ -131,6 +133,7 @@ def build_html(dataset):
         .key .region-label { color: var(--key); }
         .value .region-label { color: var(--value); }
         .other .region-label { color: var(--other); }
+        .inline .region-label { color: var(--inline); }
         .panel { padding: 14px; }
         .panel h2 { font-size: 17px; margin: 0 0 10px; }
         .summary { color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; }
@@ -224,6 +227,9 @@ const regionMap = new Map();
 let currentPage = 0;
 
 function primaryLabel(region) {
+    if (region.labels.includes("KEY") && region.labels.includes("VALUE")) {
+        return "INLINE";
+    }
     for (const label of ["KEY", "VALUE", "OTHER"]) {
         if (region.labels.includes(label)) return label;
     }
@@ -272,7 +278,8 @@ function renderRegions(page) {
         box.title = `${region.id} · ${region.text}`;
         const badge = document.createElement("span");
         badge.className = "region-label";
-        badge.textContent = `${region.id} · ${label}`;
+        const displayLabel = label === "INLINE" ? "KEY/VALUE" : label;
+        badge.textContent = `${region.id} · ${displayLabel}`;
         box.appendChild(badge);
         box.addEventListener("click", () => selectRegion(region));
         stage.appendChild(box);
@@ -286,6 +293,7 @@ function clearLinks() {
 }
 
 function drawLine(firstId, secondId, color) {
+    if (firstId === secondId) return;
     const first = regionMap.get(firstId);
     const second = regionMap.get(secondId);
     if (!first || !second) return;
@@ -333,9 +341,12 @@ function renderLinks(page) {
     const keyValueContainer = document.getElementById("keyValueLinks");
     keyValueContainer.replaceChildren();
     for (const link of page.links || []) {
+        const isInline = link.key_region_id === link.value_region_id;
         appendLinkItem(
             keyValueContainer,
-            `${link.key_text} [${link.key_region_id}] → ${link.value_text} [${link.value_region_id}]`,
+            isInline
+                ? `KEY/VALUE inline: ${link.key_text} [${link.key_region_id}]`
+                : `${link.key_text} [${link.key_region_id}] → ${link.value_text} [${link.value_region_id}]`,
             [link.key_region_id, link.value_region_id],
             link.score,
         );
