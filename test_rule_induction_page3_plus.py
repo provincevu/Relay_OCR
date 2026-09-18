@@ -22,8 +22,8 @@ from scripts.export_pages_3plus import DPI
 from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
 
 
-DETECTOR_CACHE_VERSION = "PP-OCRv6_small_det-v1"
-RECOGNITION_CACHE_VERSION = "page3-plus-recognition-v1"
+DETECTOR_CACHE_VERSION = "PP-OCRv6_medium_det-v1"
+RECOGNITION_CACHE_VERSION = "page3-plus-recognition-medium-v1"
 IMAGE_FILE_PATTERN = re.compile(
     r"^(?P<pdf_stem>.+)_page_(?P<physical_page>[1-9][0-9]*)\.(?:png|jpg|jpeg|bmp|tif|tiff)$",
     re.IGNORECASE,

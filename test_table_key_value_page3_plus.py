@@ -305,7 +305,7 @@ class Page3PlusKeyValueExtractor:
     def __init__(self):
         """Khởi tạo PP-OCRv6 small và VietOCR để hiệu chỉnh tiếng Việt."""
         self.text_detector = TextDetection(
-            model_name="PP-OCRv6_small_det",
+            model_name="PP-OCRv6_medium_det",
             device="cpu",
             engine="paddle_static",
             enable_mkldnn=False,

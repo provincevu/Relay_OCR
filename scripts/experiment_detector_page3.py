@@ -27,6 +27,7 @@ BASE_CONFIG = {
     "box_thresh": 0.6,
     "unclip_ratio": 1.5,
 }
+BASE_MODEL_NAME = "PP-OCRv6_medium_det"
 RENDER_DPI = 400
 
 
@@ -35,16 +36,17 @@ def build_experiments():
     experiments = [
         {
             "name": "baseline",
+            "model_name": BASE_MODEL_NAME,
             "parameter": "baseline",
             "value": "-",
             "config": dict(BASE_CONFIG),
         }
     ]
     parameter_values = {
-        "limit_side_len": [1200, 2000, 2400, 3200],
-        "thresh": [0.2, 0.25, 0.35, 0.4],
-        "box_thresh": [0.5, 0.7, 0.8],
-        "unclip_ratio": [1.1, 1.25, 1.75, 2.0],
+        "limit_side_len": [800, 1200, 2000, 2800, 4000, 6000, 8000],
+        "thresh": [0.05, 0.1, 0.2, 0.4, 0.5, 0.7, 0.9],
+        "box_thresh": [0.1, 0.2, 0.4, 0.8, 0.9, 0.95],
+        "unclip_ratio": [0.25, 0.4, 0.6, 0.8, 1.0, 1.25, 2.0, 3.0],
     }
     for parameter, values in parameter_values.items():
         for value in values:
@@ -52,10 +54,18 @@ def build_experiments():
             config[parameter] = value
             experiments.append({
                 "name": f"{parameter}_{str(value).replace('.', '_')}",
+                "model_name": BASE_MODEL_NAME,
                 "parameter": parameter,
                 "value": value,
                 "config": config,
             })
+    experiments.append({
+        "name": "model_small",
+        "model_name": "PP-OCRv6_small_det",
+        "parameter": "model_name",
+        "value": "PP-OCRv6_small_det",
+        "config": dict(BASE_CONFIG),
+    })
     return experiments
 
 
@@ -161,6 +171,8 @@ def build_html(image_path, experiment_results):
 <section id="{anchor}">
     <h2>{escape(experiment["name"])}</h2>
     <p class="summary">
+        Model: <strong>{escape(experiment["model_name"])}</strong>
+        ·
         Thay đổi: <strong>{escape(str(experiment["parameter"]))}</strong>
         = <strong>{escape(str(experiment["value"]))}</strong>
         · Số polygon: <strong>{result["polygon_count"]}</strong>
@@ -271,13 +283,7 @@ def main():
     if image is None:
         raise ValueError(f"Không đọc được ảnh: {image_path}")
 
-    detector = TextDetection(
-        model_name="PP-OCRv6_small_det",
-        device="cpu",
-        engine="paddle_static",
-        enable_mkldnn=False,
-        cpu_threads=4,
-    )
+    detectors = {}
     experiment_results = []
     experiments = build_experiments()
     for index, experiment in enumerate(experiments, start=1):
@@ -285,7 +291,20 @@ def main():
             f"[{index}/{len(experiments)}] {experiment['name']}",
             flush=True,
         )
-        polygons = detect_polygons(detector, image, experiment["config"])
+        model_name = experiment["model_name"]
+        if model_name not in detectors:
+            detectors[model_name] = TextDetection(
+                model_name=model_name,
+                device="cpu",
+                engine="paddle_static",
+                enable_mkldnn=False,
+                cpu_threads=4,
+            )
+        polygons = detect_polygons(
+            detectors[model_name],
+            image,
+            experiment["config"],
+        )
         image_name = f"{index:02d}_{experiment['name']}.png"
         json_name = f"{index:02d}_{experiment['name']}.json"
         cv2.imwrite(
