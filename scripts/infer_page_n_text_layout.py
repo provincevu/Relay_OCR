@@ -9,11 +9,14 @@
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
 from time import perf_counter
 
 import torch
 from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3TokenizerFast
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.export_pages_3plus import DPI
 from scripts.page3_layout_model import (
