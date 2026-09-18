@@ -2326,6 +2326,7 @@ def _process_image(
     output_directory,
     pdf_name,
     physical_page,
+    recognition_cache_directory=None,
 ):
     """Chạy recognition trên một ảnh và tạo record tương thích với HTML."""
     image = cv2.imread(str(image_path))
@@ -2335,7 +2336,10 @@ def _process_image(
     recognized_regions, recognition_cache_hit = _recognize_regions_with_cache(
         extractor,
         image,
-        output_directory / "recognition_cache",
+        (
+            recognition_cache_directory
+            or output_directory / "recognition_cache"
+        ),
     )
     image_name = image_path.relative_to(output_directory).as_posix()
     page = {

@@ -1,7 +1,8 @@
 # Mục đích: suy luận KEY/VALUE trên toàn bộ page vật lý từ page 3 trở đi.
 # Chức năng: render page 3+, chạy PP-OCR + VietOCR hiệu chỉnh, rồi chạy model layout.
 # Luồng xử lý: folder PDF → render page 3+ → detector/recognition cache → Layout model → JSON.
-# Cấu hình/parameter: folder PDF, checkpoint, output, threshold và device nhận từ command line.
+# Cấu hình/parameter: folder PDF, checkpoint, output, recognition cache,
+# threshold và device nhận từ command line.
 # Quan hệ: dùng cùng luồng render/OCR của test_rule_induction_page3_plus.py.
 # Input/output: đọc PDF; ghi ảnh page 3+, cache detector/recognition và predictions.json.
 # Contract: page 3+ là page vật lý có số từ 3 trở đi; link mặc định là row-link.
@@ -161,6 +162,7 @@ def parse_arguments():
     parser.add_argument("--pdf-directory", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--recognition-cache-directory", type=Path)
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument("--device", default="cpu")
     return parser.parse_args()
@@ -224,6 +226,9 @@ def main():
                 arguments.output,
                 pdf_path.name,
                 physical_page,
+                recognition_cache_directory=(
+                    arguments.recognition_cache_directory
+                ),
             )
             prediction = infer_page(
                 page_record,
