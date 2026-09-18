@@ -1,6 +1,7 @@
 # Mục đích: so sánh nhiều cấu hình PP-OCR text detector trên một ảnh page 3+.
-# Chức năng: chạy từng cấu hình, lưu polygon detection, ảnh overlay và HTML đánh giá.
-# Luồng xử lý: ảnh đầu vào → detector theo từng cấu hình → JSON/PNG → index.html.
+# Chức năng: render PDF tùy chọn, chạy từng cấu hình, lưu polygon detection,
+# ảnh overlay và HTML đánh giá.
+# Luồng xử lý: PDF/ảnh đầu vào → render tùy chọn → detector → JSON/PNG → index.html.
 # Cấu hình/parameter: baseline và các giá trị thay thế cho limit_side_len, thresh,
 # box_thresh và unclip_ratio.
 # Quan hệ: dùng cùng model và tham số detector với test_table_key_value_page3_plus.py.
@@ -9,6 +10,8 @@
 
 import argparse
 import json
+import shutil
+import subprocess
 from html import escape
 from pathlib import Path
 
@@ -24,6 +27,7 @@ BASE_CONFIG = {
     "box_thresh": 0.6,
     "unclip_ratio": 1.5,
 }
+RENDER_DPI = 400
 
 
 def build_experiments():
@@ -53,6 +57,31 @@ def build_experiments():
                 "config": config,
             })
     return experiments
+
+
+def render_pdf_page(pdf_path, output_directory):
+    """Render page vật lý 3 của PDF thành ảnh PNG ở 400 DPI."""
+    renderer = shutil.which("gswin64c")
+    if not renderer:
+        raise FileNotFoundError("Không tìm thấy gswin64c trong PATH.")
+    image_path = output_directory / f"{pdf_path.stem}_page_3.png"
+    command = [
+        renderer,
+        "-q",
+        "-dSAFER",
+        "-dBATCH",
+        "-dNOPAUSE",
+        "-sDEVICE=png16m",
+        f"-r{RENDER_DPI}",
+        "-dFirstPage=3",
+        "-dLastPage=3",
+        f"-sOutputFile={image_path}",
+        str(pdf_path),
+    ]
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0 or not image_path.is_file():
+        raise RuntimeError(f"Không thể render page 3: {pdf_path}")
+    return image_path
 
 
 def detect_polygons(detector, image, config):
@@ -206,11 +235,17 @@ def build_html(image_path, experiment_results):
 
 
 def parse_arguments():
-    """Đọc đường dẫn ảnh và thư mục output."""
+    """Đọc đường dẫn PDF/ảnh và thư mục output."""
     parser = argparse.ArgumentParser(
-        description="So sánh cấu hình PP-OCR detector trên một ảnh page 3.",
+        description=(
+            "So sánh cấu hình PP-OCR detector trên PDF page 3 hoặc ảnh."
+        ),
     )
-    parser.add_argument("image_path", type=Path)
+    parser.add_argument(
+        "source_path",
+        type=Path,
+        help="File PDF hoặc ảnh page 3 cần thử nghiệm.",
+    )
     parser.add_argument(
         "--output",
         type=Path,
@@ -222,15 +257,20 @@ def parse_arguments():
 def main():
     """Chạy toàn bộ thử nghiệm và tạo HTML trực quan."""
     arguments = parse_arguments()
-    image_path = arguments.image_path.resolve()
-    if not image_path.is_file():
-        raise FileNotFoundError(f"Không tìm thấy ảnh: {image_path}")
+    source_path = arguments.source_path.resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(f"Không tìm thấy nguồn dữ liệu: {source_path}")
+
+    output_directory = arguments.output.resolve()
+    output_directory.mkdir(parents=True, exist_ok=True)
+    if source_path.suffix.lower() == ".pdf":
+        image_path = render_pdf_page(source_path, output_directory)
+    else:
+        image_path = source_path
     image = cv2.imread(str(image_path))
     if image is None:
         raise ValueError(f"Không đọc được ảnh: {image_path}")
 
-    output_directory = arguments.output.resolve()
-    output_directory.mkdir(parents=True, exist_ok=True)
     detector = TextDetection(
         model_name="PP-OCRv6_small_det",
         device="cpu",
