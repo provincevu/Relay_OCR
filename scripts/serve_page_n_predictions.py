@@ -82,6 +82,8 @@ def build_html(dataset):
         }
         .toolbar label { font-weight: 700; }
         select { font: inherit; padding: 7px 9px; }
+        button { cursor: pointer; font: inherit; padding: 7px 9px; }
+        button:disabled { cursor: not-allowed; opacity: .5; }
         .toolbar span { color: var(--muted); font-size: 14px; }
         .toolbar input { margin-right: 4px; }
         .layout {
@@ -177,6 +179,7 @@ def build_html(dataset):
     <div class="toolbar">
         <label for="pageSelect">Page:</label>
         <select id="pageSelect"></select>
+        <button id="nextPageButton" type="button">Trang kế tiếp →</button>
         <span id="pagePosition"></span>
         <label><input id="showBoxes" type="checkbox" checked> Bbox</label>
         <label><input id="showLinks" type="checkbox" checked> Link</label>
@@ -207,6 +210,7 @@ def build_html(dataset):
 <script>
 const pages = __PAGES_JSON__;
 const pageSelect = document.getElementById("pageSelect");
+const nextPageButton = document.getElementById("nextPageButton");
 const pagePosition = document.getElementById("pagePosition");
 const pageTitle = document.getElementById("pageTitle");
 const summary = document.getElementById("summary");
@@ -348,6 +352,7 @@ function renderPage(index) {
     currentPage = index;
     const page = pages[index];
     pageSelect.value = String(index);
+    nextPageButton.disabled = index >= pages.length - 1;
     pagePosition.textContent = `${index + 1}/${pages.length}`;
     pageTitle.textContent = `${page.pdf_name} · trang ${page.physical_page}`;
     summary.textContent = [
@@ -369,6 +374,9 @@ for (const [index, page] of pages.entries()) {
     pageSelect.appendChild(option);
 }
 pageSelect.addEventListener("change", () => renderPage(Number(pageSelect.value)));
+nextPageButton.addEventListener("click", () => {
+    if (currentPage < pages.length - 1) renderPage(currentPage + 1);
+});
 showBoxes.addEventListener("change", () => {
     document.querySelectorAll(".region-box").forEach(box => {
         box.style.display = showBoxes.checked ? "block" : "none";
