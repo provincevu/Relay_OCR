@@ -2,6 +2,29 @@
 
 cung cấp pipeline OCR phiếu chỉnh định rơ-le cho các trạm biến áp.
 
+## Tạo dataset page 3+
+
+Render các page dữ liệu từ `data/pdf`, sau đó chia theo phiếu/PDF thành ba tập
+`train`, `val`, `test`. Mỗi phiếu được shuffle riêng với seed 42 rồi chia page
+theo rule: 2 page thì train/test mỗi tập một page; từ 3 page trở lên chia đều,
+ưu tiên phần dư theo thứ tự train, test, val.
+
+```bash
+python scripts/build_page3plus_dataset.py
+```
+
+Kết quả nằm trong `data/page3plus_dataset/`, gồm ảnh PNG, `manifest.json` ở
+gốc và manifest riêng trong từng split. Có thể thay đổi DPI hoặc seed:
+
+```bash
+python scripts/build_page3plus_dataset.py --dpi 400 --seed 42
+```
+
+Nếu chạy lại để tạo mới dataset, thêm `--overwrite`.
+
+Script cần Ghostscript (`gswin64c` trên Windows) trong `PATH` hoặc truyền
+đường dẫn bằng `--renderer`.
+
 ## Cài đặt
 
 ```bash
