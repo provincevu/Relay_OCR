@@ -45,6 +45,7 @@ def load_layout_model(checkpoint_directory, device):
     model = Page3LayoutModel(
         LayoutLMv3Model(config),
         len(checkpoint["roles"]),
+        checkpoint.get("head_dropout", 0.3),
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()

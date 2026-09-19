@@ -1,14 +1,12 @@
-# Mục đích: so sánh LayoutLMv3 có ảnh và LayoutLMv3 chỉ dùng text + bbox.
-# Chức năng: mã hóa OCR, dự đoán đa nhãn region và các liên kết region.
-# Luồng xử lý: chia token thành chunk → encoder → gộp region → hai head.
+# Mục đích: LayoutLMv3 chỉ dùng text + bbox cho page 3+.
+# Chức năng: mã hóa OCR, dự đoán đa nhãn region và row-link giữa các region.
+# Luồng xử lý: chia token thành chunk → encoder → gộp region → role head.
 # Cấu hình/parameter: variant A/B, checkpoint encoder, danh sách role.
 # Quan hệ: dùng chung bởi lệnh train và compare trong compare_page3_layout.
-# Input/output: một page OCR → logits [region, role] và [region, region],
-# cùng liên kết KEY → VALUE; value phải nằm bên phải key.
-# Contract: A dùng ảnh; B visual_embed=False; cùng tokenizer/head/cách pooling.
+# Input/output: một page OCR → logits [region, role] và liên kết KEY → VALUE;
+# value được nối theo quy tắc cùng hàng.
+# Contract: A dùng ảnh; B visual_embed=False; model training hiện tại dùng B.
 # Contract: không cắt bỏ token cuối trang; cạnh có thể nối region khác chunk.
-
-import math
 
 import torch
 from PIL import Image
@@ -24,19 +22,18 @@ from .page_n_prediction_filter import filter_prediction_links
 
 
 class Page3LayoutModel(nn.Module):
-    """Học vai trò và liên kết region bằng cùng kiến trúc cho hai nhánh."""
+    """Học vai trò region; liên kết KEY -> VALUE dùng row-link."""
 
-    def __init__(self, encoder, role_count):
-        """Tạo head đa nhãn và head chấm điểm cạnh có hướng."""
+    def __init__(self, encoder, role_count, head_dropout=0.3):
+        """Tạo head role với dropout; không học learned-link."""
         super().__init__()
         self.encoder = encoder
         hidden_size = encoder.config.hidden_size
+        self.head_dropout = nn.Dropout(head_dropout)
         self.role_head = nn.Linear(hidden_size, role_count)
-        self.key_head = nn.Linear(hidden_size, 128)
-        self.value_head = nn.Linear(hidden_size, 128)
 
     def forward(self, encoded, region_count):
-        """Gộp mọi subtoken theo ID region trước khi chấm điểm liên kết."""
+        """Gộp mọi subtoken theo ID region rồi dự đoán role."""
         pooled = None
         counts = None
         for chunk in encoded["chunks"]:
@@ -61,14 +58,11 @@ class Page3LayoutModel(nn.Module):
                 text_hidden.new_ones((int(valid.sum()), 1)),
             )
         region_hidden = pooled / counts
-        role_logits = self.role_head(region_hidden)
-        key_hidden = torch.tanh(self.key_head(region_hidden))
-        value_hidden = torch.tanh(self.value_head(region_hidden))
-        link_logits = key_hidden @ value_hidden.T / math.sqrt(128)
-        return role_logits, link_logits
+        role_logits = self.role_head(self.head_dropout(region_hidden))
+        return role_logits
 
 
-def load_pretrained(encoder_path, variant, role_count, seed):
+def load_pretrained(encoder_path, variant, role_count, seed, head_dropout=0.3):
     """Khởi tạo encoder pretrained và head mới cần được huấn luyện."""
     config = LayoutLMv3Config.from_pretrained(encoder_path)
     config.visual_embed = variant == "A"
@@ -77,7 +71,7 @@ def load_pretrained(encoder_path, variant, role_count, seed):
         config=config,
     )
     torch.manual_seed(seed)
-    return Page3LayoutModel(encoder, role_count)
+    return Page3LayoutModel(encoder, role_count, head_dropout)
 
 
 def load_preprocessors(encoder_path):
@@ -136,21 +130,11 @@ def encode_page(page, tokenizer, image_processor, variant, device):
     return encoded
 
 
-def training_loss(role_logits, link_logits, page):
-    """Tính loss đa nhãn và cân bằng cạnh đúng với các cạnh không liên kết."""
+def training_loss(role_logits, page):
+    """Tính role loss đa nhãn cho KEY/VALUE/OTHER."""
     roles = role_logits.new_tensor(page["role_labels"])
-    links = torch.zeros_like(link_logits)
-    for key_index, value_index in page["link_labels"]:
-        links[key_index, value_index] = 1.0
-    positive_count = links.sum()
-    positive_weight = (links.numel() - positive_count) / positive_count.clamp(min=1)
     role_loss = nn.functional.binary_cross_entropy_with_logits(role_logits, roles)
-    link_loss = nn.functional.binary_cross_entropy_with_logits(
-        link_logits,
-        links,
-        pos_weight=positive_weight,
-    )
-    return role_loss + link_loss
+    return role_loss
 
 
 def same_row_score(first, second):
@@ -197,13 +181,12 @@ def row_links(regions, source_role, target_role, source_field, target_field):
     return links
 
 
-def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
-    """Trả vai trò và cạnh region theo learned-link, row-link hoặc cả hai."""
-    if link_mode not in {"learned", "row", "both"}:
-        raise ValueError("link_mode phải là learned, row hoặc both.")
-    role_logits, link_logits = model(encoded, len(page["regions"]))
+def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
+    """Trả vai trò và cạnh row-link dựa trên role dự đoán."""
+    if link_mode != "row":
+        raise ValueError("Pipeline hiện tại chỉ hỗ trợ row-link.")
+    role_logits = model(encoded, len(page["regions"]))
     role_scores = role_logits.sigmoid().cpu().tolist()
-    link_scores = link_logits.sigmoid().cpu().tolist()
     regions = []
     for region, scores in zip(page["regions"], role_scores, strict=True):
         regions.append({
@@ -216,18 +199,6 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
             ] or ["OTHER"],
             "scores": dict(zip(roles, scores, strict=True)),
         })
-    learned_links = []
-    for key_index, key in enumerate(regions):
-        if "KEY" not in key["labels"]:
-            continue
-        for value_index, value in enumerate(regions):
-            score = link_scores[key_index][value_index]
-            if "VALUE" in value["labels"] and score >= threshold:
-                learned_links.append({
-                    "key_region_id": key["id"],
-                    "value_region_id": value["id"],
-                    "score": score,
-                })
     row_key_value_links = row_links(
         regions,
         "KEY",
@@ -235,18 +206,9 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="learned"):
         "key_region_id",
         "value_region_id",
     )
-    links_by_mode = {
-        "learned": learned_links,
-        "row": row_key_value_links,
-    }
-    selected_links = links_by_mode[
-        "learned" if link_mode == "both" else link_mode
-    ]
     result = {
         "regions": regions,
         "link_mode": link_mode,
-        "links": selected_links,
+        "links": row_key_value_links,
     }
-    if link_mode == "both":
-        result["links_by_mode"] = links_by_mode
     return filter_prediction_links(result)
