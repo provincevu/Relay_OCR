@@ -1,11 +1,11 @@
-# Mục đích: suy luận KEY/VALUE trên toàn bộ page vật lý từ page 3 trở đi.
-# Chức năng: render page 3+, chạy PP-OCR + VietOCR hiệu chỉnh, rồi chạy model layout.
-# Luồng xử lý: folder PDF → render page 3+ → detector/recognition cache → Layout model → JSON.
+# Mục đích: suy luận KEY/VALUE trên toàn bộ page dữ liệu 3+.
+# Chức năng: dùng quy tắc chọn page dữ liệu, chạy PP-OCR + VietOCR hiệu chỉnh, rồi chạy model layout.
+# Luồng xử lý: folder PDF → chọn page dữ liệu → detector/recognition cache → Layout model → JSON.
 # Cấu hình/parameter: folder PDF, checkpoint, output, recognition cache,
 # threshold và device nhận từ command line.
 # Quan hệ: dùng cùng luồng render/OCR của test_rule_induction_page3_plus.py.
 # Input/output: đọc PDF; ghi ảnh page 3+, cache detector/recognition và predictions.json.
-# Contract: page 3+ là page vật lý có số từ 3 trở đi; link mặc định là row-link.
+# Contract: page 3+ bắt đầu từ page dữ liệu đầu tiên sau page 1; link mặc định là row-link.
 
 import argparse
 import json
@@ -160,7 +160,7 @@ def recognition_source(extractor, cache_hit):
 def parse_arguments():
     """Đọc folder PDF và các tham số suy luận page 3+."""
     parser = argparse.ArgumentParser(
-        description="Suy luận Layout model trên toàn bộ page vật lý 3+.",
+        description="Suy luận Layout model trên toàn bộ page dữ liệu 3+.",
     )
     parser.add_argument("--pdf-directory", type=Path, required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
@@ -172,7 +172,7 @@ def parse_arguments():
 
 
 def main():
-    """Render, OCR và suy luận tuần tự trên mọi page 3+ của folder PDF."""
+    """Render, OCR và suy luận tuần tự trên mọi page dữ liệu 3+ của folder PDF."""
     arguments = parse_arguments()
     if not arguments.pdf_directory.is_dir():
         raise FileNotFoundError(
@@ -206,14 +206,14 @@ def main():
     processed_pages = 0
     for file_index, pdf_path in enumerate(pdf_files, start=1):
         progress = f"[{file_index}/{total_files}] {pdf_path.name}"
-        print(f"{progress} | Đang render các page 3+...", flush=True)
+        print(f"{progress} | Đang render các page dữ liệu 3+...", flush=True)
         rendered_pages = _render_pages_3plus(
             renderer,
             pdf_path,
             image_directory,
         )
         if not rendered_pages:
-            print(f"{progress} | Bỏ qua: không có page 3+.", flush=True)
+            print(f"{progress} | Bỏ qua: không có page dữ liệu 3+.", flush=True)
             continue
 
         for physical_page, image_path in rendered_pages:
@@ -256,10 +256,10 @@ def main():
             )
 
     if not pages:
-        raise FileNotFoundError("Không có PDF nào chứa page 3+.")
+        raise FileNotFoundError("Không có PDF nào chứa page dữ liệu 3+.")
     result = {
         "schema_version": 1,
-        "page_range": "3+",
+        "page_range": "data_pages_3plus",
         "dpi": DPI,
         "link_mode": "row",
         "threshold": arguments.threshold,
@@ -274,7 +274,7 @@ def main():
         encoding="utf-8",
     )
     print(
-        f"Đã lưu {processed_pages} page 3+ từ {total_files} PDF: "
+        f"Đã lưu {processed_pages} page dữ liệu 3+ từ {total_files} PDF: "
         f"{output_path} ({perf_counter() - total_started:.1f}s)",
         flush=True,
     )

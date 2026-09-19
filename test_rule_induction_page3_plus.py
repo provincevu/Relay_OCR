@@ -1,10 +1,10 @@
-# Mục đích: thử nghiệm Rule Induction tương tác cho key-value trên các page 3+.
-# Chức năng: render page 3+, chạy cache detector/recognition và tạo HTML; hỗ trợ đọc folder ảnh đã lọc.
-# Luồng xử lý: folder PDF → render page 3+ → recognition cache/OCR → HTML.
+# Mục đích: thử nghiệm Rule Induction tương tác cho các page dữ liệu 3+.
+# Chức năng: chọn page dữ liệu, chạy cache detector/recognition và tạo HTML; hỗ trợ đọc folder ảnh đã lọc.
+# Luồng xử lý: folder PDF → chọn page dữ liệu → recognition cache/OCR → HTML.
 # Cấu hình/parameter: nhận folder PDF, --save-images hoặc --image-directory; render page ở 400 DPI.
 # Quan hệ: sử dụng OCR từ test_table_key_value_page3_plus.py.
 # Input/output: đọc PDF hoặc ảnh; ghi ảnh, các cache và rule_induction.html.
-# Contract: page 3+ là các page vật lý có số từ 3 trở đi.
+# Contract: page 3+ bắt đầu từ page dữ liệu đầu tiên sau page 1; page 2 có thể là page ý kiến.
 
 import argparse
 import hashlib
@@ -18,14 +18,14 @@ from time import perf_counter
 
 import cv2
 
-from scripts.export_pages_3plus import DPI
+from scripts.export_pages_3plus import DPI, find_first_data_page
 from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
 
 
 DETECTOR_CACHE_VERSION = "PP-OCRv6_medium_det-v1"
 RECOGNITION_CACHE_VERSION = "page3-plus-recognition-medium-v1"
 IMAGE_FILE_PATTERN = re.compile(
-    r"^(?P<pdf_stem>.+)_page_(?P<physical_page>[1-9][0-9]*)\.(?:png|jpg|jpeg|bmp|tif|tiff)$",
+    r"^(?P<pdf_stem>.+?)(?:_page_(?P<underscore_page>[1-9][0-9]*)|-page-0*(?P<hyphen_page>[1-9][0-9]*))\.(?:png|jpg|jpeg|bmp|tif|tiff)$",
     re.IGNORECASE,
 )
 
@@ -80,7 +80,15 @@ class CachedTextDetector:
 
 
 def _render_pages_3plus(renderer, pdf_file, output_directory):
-    """Render toàn bộ page vật lý từ page 3 và trả đường dẫn theo số thật."""
+    """Render toàn bộ page dữ liệu từ page được chọn và trả số vật lý thật."""
+    first_data_page = find_first_data_page(
+        renderer,
+        pdf_file,
+        output_directory,
+    )
+    if first_data_page is None:
+        return []
+
     output_pattern = output_directory / f".{pdf_file.stem}_render_%03d.png"
     rendered_pattern = f".{pdf_file.stem}_render_*.png"
     for rendered_path in output_directory.glob(rendered_pattern):
@@ -94,17 +102,20 @@ def _render_pages_3plus(renderer, pdf_file, output_directory):
         "-dNOPAUSE",
         "-sDEVICE=png16m",
         f"-r{DPI}",
-        "-dFirstPage=3",
+        f"-dFirstPage={first_data_page}",
         f"-sOutputFile={output_pattern}",
         str(pdf_file),
     ]
     result = subprocess.run(command, check=False)
     if result.returncode != 0:
-        raise RuntimeError(f"Không thể render page 3+: {pdf_file.name}")
+        raise RuntimeError(f"Không thể render page dữ liệu: {pdf_file.name}")
 
     rendered_pages = sorted(output_directory.glob(rendered_pattern))
     pages = []
-    for page_index, rendered_path in enumerate(rendered_pages, start=3):
+    for page_index, rendered_path in enumerate(
+        rendered_pages,
+        start=first_data_page,
+    ):
         output_path = output_directory / (
             f"{pdf_file.stem}_page_{page_index}.png"
         )
@@ -121,7 +132,7 @@ def parse_arguments():
     parser.add_argument(
         "--save-images",
         action="store_true",
-        help="Chỉ render page 3+ ra folder images, chưa chạy OCR.",
+        help="Chỉ render page dữ liệu 3+ ra folder images, chưa chạy OCR.",
     )
     arguments = parser.parse_args()
     if arguments.pdf_directory is None and arguments.image_directory is None:
@@ -2375,7 +2386,7 @@ def _write_html(pages, output_directory, batch_started, processed_count, total_c
 
 
 def _run_pdf_directory(pdf_directory, save_images):
-    """Render và tùy chọn OCR page 3+ từ folder PDF."""
+    """Render và tùy chọn OCR page dữ liệu 3+ từ folder PDF."""
     if not pdf_directory.is_dir():
         raise FileNotFoundError(f"Không tìm thấy folder PDF: {pdf_directory}")
 
@@ -2400,7 +2411,10 @@ def _run_pdf_directory(pdf_directory, save_images):
         rendered_count = 0
         for file_index, pdf_file in enumerate(pdf_files, start=1):
             progress = f"[{file_index}/{total_files}] {pdf_file.name}"
-            print(f"{progress} | Đang render các page 3+...", flush=True)
+            print(
+                f"{progress} | Đang render các page dữ liệu 3+...",
+                flush=True,
+            )
             rendered_pages = _render_pages_3plus(
                 renderer,
                 pdf_file,
@@ -2412,7 +2426,8 @@ def _run_pdf_directory(pdf_directory, save_images):
                 flush=True,
             )
         print(
-            f"Đã lưu {rendered_count} ảnh page 3+ tại: {image_directory}",
+            f"Đã lưu {rendered_count} ảnh page dữ liệu 3+ tại: "
+            f"{image_directory}",
             flush=True,
         )
         print(
@@ -2427,7 +2442,10 @@ def _run_pdf_directory(pdf_directory, save_images):
 
     for file_index, pdf_file in enumerate(pdf_files, start=1):
         progress = f"[{file_index}/{total_files}] {pdf_file.name}"
-        print(f"{progress} | Đang render các page 3+...", flush=True)
+        print(
+            f"{progress} | Đang render các page dữ liệu 3+...",
+            flush=True,
+        )
         render_started = perf_counter()
         rendered_pages = _render_pages_3plus(
             renderer,
@@ -2435,7 +2453,7 @@ def _run_pdf_directory(pdf_directory, save_images):
             output_directory,
         )
         if not rendered_pages:
-            print(f"{progress} | Bỏ qua: không có page 3+.")
+            print(f"{progress} | Bỏ qua: không có page dữ liệu 3+.")
             continue
         processed_pdf_count += 1
 
@@ -2476,7 +2494,7 @@ def _run_pdf_directory(pdf_directory, save_images):
             )
 
     if not pages:
-        raise FileNotFoundError("Không có PDF nào chứa page 3+.")
+        raise FileNotFoundError("Không có PDF nào chứa page dữ liệu 3+.")
     _write_html(
         pages,
         output_directory,
@@ -2491,12 +2509,17 @@ def _parse_image_metadata(image_path):
     match = IMAGE_FILE_PATTERN.fullmatch(image_path.name)
     if not match:
         raise ValueError(
-            "Tên ảnh phải có dạng <pdf_stem>_page_<số>.png/jpg: "
+            "Tên ảnh phải có dạng <pdf_stem>_page_<số>.png hoặc "
+            "<pdf_stem>-page-<số>.png: "
             f"{image_path.name}"
         )
+    physical_page = (
+        match.group("underscore_page")
+        or match.group("hyphen_page")
+    )
     return (
         f"{match.group('pdf_stem')}.pdf",
-        int(match.group("physical_page")),
+        int(physical_page),
     )
 
 
