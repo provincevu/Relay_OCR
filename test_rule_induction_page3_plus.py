@@ -2497,10 +2497,10 @@ def _run_pdf_directory(pdf_directory, save_images):
         raise FileNotFoundError("Không có PDF nào chứa page dữ liệu 3+.")
     _write_html(
         pages,
-        output_directory,
+        output_directory / f"rule_induction_{image_directory.name}.html",
         batch_started,
-        processed_pdf_count,
-        total_files,
+        len(image_paths),
+        len(image_paths),
     )
 
 
@@ -2581,7 +2581,7 @@ def _run_image_directory(image_directory):
 
     _write_html(
         pages,
-        output_directory,
+        output_directory / f"rule_induction_{image_directory.name}.html",
         batch_started,
         len(image_paths),
         len(image_paths),
