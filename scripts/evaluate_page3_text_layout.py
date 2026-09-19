@@ -1,5 +1,5 @@
 # Mục đích: đánh giá checkpoint LayoutLMv3 text + bbox trên dataset page 3+.
-# Chức năng: đo nhận diện KEY/VALUE/OTHER và các liên kết KEY → VALUE.
+# Chức năng: đo nhận diện KEY/VALUE/OTHER và row-link KEY → VALUE.
 # Luồng xử lý: tải checkpoint → dự đoán từng phiếu → so sánh region/cạnh với nhãn thật → ghi metric.
 # Cấu hình/parameter: dataset, checkpoint, device, threshold và output nhận từ command line.
 # Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.train_page3_text_layout.
@@ -71,6 +71,7 @@ def load_model(checkpoint_directory, device):
     model = Page3LayoutModel(
         LayoutLMv3Model(config),
         len(checkpoint["roles"]),
+        checkpoint.get("head_dropout", 0.3),
     )
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()
@@ -88,8 +89,7 @@ def evaluate(arguments):
     ]
     model, tokenizer, roles = load_model(arguments.checkpoint, arguments.device)
     role_counts = {role: [0, 0, 0] for role in EVALUATED_ROLES}
-    link_modes = ["learned", "row"] if arguments.link_mode == "both" \
-        else [arguments.link_mode]
+    link_modes = [arguments.link_mode]
     link_counts = {mode: [0, 0, 0] for mode in link_modes}
     ignored_unlabeled = 0
 
@@ -146,22 +146,17 @@ def evaluate(arguments):
                 for value_id in relation["value_region_ids"]
                 if key_id in known_ids and value_id in known_ids
             }
-            links_by_mode = prediction.get(
-                "links_by_mode",
-                {arguments.link_mode: prediction["links"]},
-            )
-            for mode in link_modes:
-                predicted_links = {
-                    (link["key_region_id"], link["value_region_id"])
-                    for link in links_by_mode[mode]
-                    if link["key_region_id"] in known_ids
-                    and link["value_region_id"] in known_ids
-                }
-                counts = set_counts(gold_links, predicted_links)
-                link_counts[mode] = [
-                    left + right
-                    for left, right in zip(link_counts[mode], counts)
-                ]
+            predicted_links = {
+                (link["key_region_id"], link["value_region_id"])
+                for link in prediction["links"]
+                if link["key_region_id"] in known_ids
+                and link["value_region_id"] in known_ids
+            }
+            counts = set_counts(gold_links, predicted_links)
+            link_counts["row"] = [
+                left + right
+                for left, right in zip(link_counts["row"], counts)
+            ]
 
     role_metrics = {
         role: metric_from_counts(*counts)
@@ -214,9 +209,9 @@ def main():
     parser.add_argument("--threshold", type=float, default=0.5)
     parser.add_argument(
         "--link-mode",
-        choices=["learned", "row", "both"],
+        choices=["row"],
         default="row",
-        help="Cách tạo liên kết KEY → VALUE; mặc định dùng row-link.",
+        help="Cách tạo liên kết KEY → VALUE; pipeline chỉ dùng row-link.",
     )
     parser.add_argument("--device", default="cpu")
     arguments = parser.parse_args()

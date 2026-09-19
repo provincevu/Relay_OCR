@@ -1,20 +1,26 @@
 # Mục đích: fine-tune LayoutLMv3 chỉ dùng text + bbox từ annotation page 3.
-# Chức năng: học KEY/VALUE/OTHER và liên kết KEY → VALUE.
-# Luồng xử lý: phiếu đã xác nhận → mã hóa region → loss có mask → checkpoint.
+# Chức năng: học KEY/VALUE/OTHER; liên kết KEY → VALUE dùng row-link.
+# Luồng xử lý: phiếu đã xác nhận → mã hóa region → role loss → checkpoint tốt nhất.
 # Cấu hình/parameter: python -m scripts.train_page3_text_layout --help.
 # Quan hệ: dùng annotations.json của serve_page3_annotations và model B hiện có.
 # Input/output: train nhận dataset đã chia bên ngoài; predict nhận manifest OCR.
 # Contract: UNLABELED chỉ làm ngữ cảnh, không là target hoặc cạnh âm/dương.
-# Contract: giữ nhóm trong dataset; head liên kết học mọi cạnh giữa hai nhóm.
+# Contract: không có learned-link head/loss; relation production là row-link.
 # Contract: không chia train/test/val; visual_embed=False, không phải bản distilled.
 
 import argparse
+import copy
 import json
 import random
 from pathlib import Path
 
 import torch
-from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3TokenizerFast
+from transformers import (
+    LayoutLMv3Config,
+    LayoutLMv3Model,
+    LayoutLMv3TokenizerFast,
+    get_linear_schedule_with_warmup,
+)
 
 from scripts.page3_layout_model import (
     Page3LayoutModel,
@@ -38,8 +44,8 @@ def prepare_page(record):
     }
 
 
-def masked_training_loss(role_logits, link_logits, page):
-    """Bỏ qua region UNLABELED và mọi cạnh có ít nhất một đầu chưa gán nhãn."""
+def masked_training_loss(role_logits, page):
+    """Tính role loss và bỏ qua region UNLABELED."""
     region_ids = [region["id"] for region in page["regions"]]
     labels = [page["annotations"][region_id] for region_id in region_ids]
     normalized_labels = []
@@ -67,36 +73,170 @@ def masked_training_loss(role_logits, link_logits, page):
         reduction="none",
     )
     role_loss = role_losses[known].sum() / (known.sum() * len(ROLES)).clamp(min=1)
-    indices = {region_id: index for index, region_id in enumerate(region_ids)}
-    link_targets = torch.zeros_like(link_logits)
-    for relation in page["relations"]:
-        for key_id in relation["key_region_ids"]:
-            for value_id in relation["value_region_ids"]:
-                link_targets[indices[key_id], indices[value_id]] = 1
-    link_mask = known[:, None] & known[None, :]
-    positives = link_targets[link_mask].sum()
-    positive_weight = ((link_mask.sum() - positives) / positives.clamp(min=1)).clamp(min=1)
-    link_losses = torch.nn.functional.binary_cross_entropy_with_logits(
-        link_logits,
-        link_targets,
-        pos_weight=positive_weight,
-        reduction="none",
-    )
-    link_loss = link_losses[link_mask].sum() / link_mask.sum().clamp(min=1)
-    return role_loss + link_loss
+    return role_loss
 
 
-def train(arguments):
-    """Huấn luyện nhánh B trên các phiếu đã xác nhận, lưu tokenizer và hai head."""
-    dataset = json.loads(arguments.dataset.read_text(encoding="utf-8"))
-    pages = [
+def _update_counts(counts, gold, predicted):
+    """Cộng TP/FP/FN của hai tập ID."""
+    counts[0] += len(gold & predicted)
+    counts[1] += len(predicted - gold)
+    counts[2] += len(gold - predicted)
+
+
+def _f1_from_counts(counts):
+    """Tính F1 từ TP/FP/FN."""
+    true_positive, false_positive, false_negative = counts
+    precision = true_positive / (true_positive + false_positive) \
+        if true_positive + false_positive else 0.0
+    recall = true_positive / (true_positive + false_negative) \
+        if true_positive + false_negative else 0.0
+    return 2 * precision * recall / (precision + recall) \
+        if precision + recall else 0.0
+
+
+def _normalize_prediction_labels(labels):
+    """Không cho OTHER đi cùng KEY/VALUE trong metric."""
+    labels = set(labels)
+    if labels.intersection({"KEY", "VALUE"}):
+        labels.discard("OTHER")
+    return labels or {"OTHER"}
+
+
+def validation_metrics(pages, model, tokenizer, device, threshold):
+    """Đánh giá role F1 và row-link F1 để early stopping."""
+    role_counts = {role: [0, 0, 0] for role in ["KEY", "VALUE"]}
+    row_link_counts = [0, 0, 0]
+    model.eval()
+    with torch.inference_mode():
+        for page in pages:
+            encoded = encode_page(page, tokenizer, None, "B", device)
+            prediction = predict_page(
+                model,
+                encoded,
+                page,
+                ROLES,
+                threshold,
+                "row",
+            )
+            labels = page["annotations"]
+            known_ids = {
+                region["id"]
+                for region in page["regions"]
+                if "UNLABELED" not in labels[region["id"]]
+            }
+            predicted_labels = {
+                region["id"]: _normalize_prediction_labels(region["labels"])
+                for region in prediction["regions"]
+            }
+            for role in role_counts:
+                gold = {
+                    region_id
+                    for region_id in known_ids
+                    if role in labels[region_id]
+                }
+                predicted = {
+                    region_id
+                    for region_id in known_ids
+                    if role in predicted_labels[region_id]
+                }
+                _update_counts(role_counts[role], gold, predicted)
+
+            gold_links = {
+                (key_id, value_id)
+                for relation in page["relations"]
+                for key_id in relation["key_region_ids"]
+                for value_id in relation["value_region_ids"]
+                if key_id in known_ids and value_id in known_ids
+            }
+            predicted_links = {
+                (link["key_region_id"], link["value_region_id"])
+                for link in prediction["links"]
+                if link["key_region_id"] in known_ids
+                and link["value_region_id"] in known_ids
+            }
+            _update_counts(row_link_counts, gold_links, predicted_links)
+
+    key_f1 = _f1_from_counts(role_counts["KEY"])
+    value_f1 = _f1_from_counts(role_counts["VALUE"])
+    row_link_f1 = _f1_from_counts(row_link_counts)
+    role_f1 = (key_f1 + value_f1) / 2
+    val_f1 = 0.5 * role_f1 + 0.5 * row_link_f1
+    model.train()
+    return {
+        "key_f1": key_f1,
+        "value_f1": value_f1,
+        "role_f1": role_f1,
+        "row_link_f1": row_link_f1,
+        "val_f1": val_f1,
+    }
+
+
+def _load_pages(dataset_path):
+    """Đọc các page đã xác nhận và có annotation dùng được."""
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    return [
         prepare_page(record)
         for record in dataset["pages"].values()
         if record["confirmed_at"]
         and any("UNLABELED" not in labels for labels in record["annotations"].values())
     ]
+
+
+def _optimizer_parameters(model, weight_decay):
+    """Tách parameter decay và no-decay theo quy tắc AdamW chuẩn."""
+    decay = []
+    no_decay = []
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad:
+            continue
+        if parameter.ndim == 1 or name.endswith("bias"):
+            no_decay.append(parameter)
+        else:
+            decay.append(parameter)
+    return [
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
+    ]
+
+
+def _save_checkpoint(output, tokenizer, model, epoch, metrics, head_dropout):
+    """Lưu tokenizer và checkpoint tốt nhất hiện tại."""
+    output.mkdir(parents=True, exist_ok=True)
+    tokenizer.save_pretrained(output)
+    torch.save(
+        {
+            "roles": ROLES,
+            "encoder_config": model.encoder.config.to_dict(),
+            "model_state": model.state_dict(),
+            "head_dropout": head_dropout,
+            "link_mode": "row",
+            "best_epoch": epoch,
+            "best_val_metrics": metrics,
+        },
+        output / "model.pt",
+    )
+
+
+def train(arguments):
+    """Train role heads, chọn checkpoint theo row-link validation F1."""
+    pages = _load_pages(arguments.dataset)
+    validation_pages = _load_pages(arguments.validation_dataset)
     if not pages:
         raise ValueError("Dataset chưa có phiếu đã xác nhận với nhãn dùng được.")
+    if not validation_pages:
+        raise ValueError("Validation dataset chưa có phiếu đã xác nhận dùng được.")
+    if not 0 <= arguments.warmup_ratio <= 1:
+        raise ValueError("warmup_ratio phải nằm trong khoảng 0 đến 1.")
+    if arguments.weight_decay < 0:
+        raise ValueError("weight_decay không được âm.")
+    if arguments.max_grad_norm <= 0:
+        raise ValueError("max_grad_norm phải lớn hơn 0.")
+    if arguments.head_dropout < 0 or arguments.head_dropout >= 1:
+        raise ValueError("head_dropout phải nằm trong khoảng [0, 1).")
+    if arguments.early_stopping_patience < 1:
+        raise ValueError("early_stopping_patience phải ít nhất là 1.")
+    if arguments.early_stopping_min_delta < 0:
+        raise ValueError("early_stopping_min_delta không được âm.")
     random.seed(arguments.seed)
     torch.manual_seed(arguments.seed)
     tokenizer = LayoutLMv3TokenizerFast.from_pretrained(arguments.encoder)
@@ -105,32 +245,89 @@ def train(arguments):
         "B",
         len(ROLES),
         arguments.seed,
+        arguments.head_dropout,
     ).to(arguments.device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=arguments.learning_rate)
-    model.train()
+    optimizer = torch.optim.AdamW(
+        _optimizer_parameters(model, arguments.weight_decay),
+        lr=arguments.learning_rate,
+    )
+    total_steps = arguments.epochs * len(pages)
+    warmup_steps = int(total_steps * arguments.warmup_ratio)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
+    best_val_f1 = float("-inf")
+    best_state = None
+    best_epoch = 0
+    best_metrics = None
+    epochs_without_improvement = 0
     for epoch in range(arguments.epochs):
+        model.train()
         random.shuffle(pages)
         total_loss = 0.0
         for page in pages:
             encoded = encode_page(page, tokenizer, None, "B", arguments.device)
             optimizer.zero_grad()
-            role_logits, link_logits = model(encoded, len(page["regions"]))
-            loss = masked_training_loss(role_logits, link_logits, page)
+            role_logits = model(encoded, len(page["regions"]))
+            loss = masked_training_loss(role_logits, page)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(),
+                arguments.max_grad_norm,
+            )
             optimizer.step()
+            scheduler.step()
             total_loss += loss.detach().item()
-        print(f"Epoch {epoch + 1}/{arguments.epochs}: loss = {total_loss / len(pages):.6f}", flush=True)
-    arguments.output.mkdir(parents=True, exist_ok=True)
-    tokenizer.save_pretrained(arguments.output)
-    torch.save(
-        {
-            "roles": ROLES,
-            "encoder_config": model.encoder.config.to_dict(),
-            "model_state": model.state_dict(),
-        },
-        arguments.output / "model.pt",
+        metrics = validation_metrics(
+            validation_pages,
+            model,
+            tokenizer,
+            arguments.device,
+            arguments.threshold,
+        )
+        average_loss = total_loss / len(pages)
+        print(
+            f"Epoch {epoch + 1}/{arguments.epochs}: "
+            f"loss={average_loss:.6f}, "
+            f"val_f1={metrics['val_f1']:.4f}, "
+            f"KEY={metrics['key_f1']:.4f}, "
+            f"VALUE={metrics['value_f1']:.4f}, "
+            f"row-link={metrics['row_link_f1']:.4f}",
+            flush=True,
+        )
+        if metrics["val_f1"] > best_val_f1 + arguments.early_stopping_min_delta:
+            best_val_f1 = metrics["val_f1"]
+            best_state = copy.deepcopy(model.state_dict())
+            best_epoch = epoch + 1
+            best_metrics = metrics
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= arguments.early_stopping_patience:
+                print(
+                    f"Early stopping tại epoch {epoch + 1}; "
+                    f"best epoch={best_epoch}, val_f1={best_val_f1:.4f}",
+                    flush=True,
+                )
+                break
+
+    if best_state is None or best_metrics is None:
+        raise RuntimeError("Không tạo được checkpoint tốt nhất theo validation F1.")
+    model.load_state_dict(best_state)
+    _save_checkpoint(
+        arguments.output,
+        tokenizer,
+        model,
+        best_epoch,
+        best_metrics,
+        arguments.head_dropout,
     )
-    print(f"Đã lưu checkpoint text + bbox: {arguments.output}")
+    print(
+        f"Đã lưu best checkpoint text + bbox: {arguments.output} "
+        f"(epoch {best_epoch}, val_f1={best_val_f1:.4f})"
+    )
 
 
 def predict(arguments):
@@ -141,7 +338,11 @@ def predict(arguments):
         weights_only=True,
     )
     config = LayoutLMv3Config.from_dict(checkpoint["encoder_config"])
-    model = Page3LayoutModel(LayoutLMv3Model(config), len(checkpoint["roles"]))
+    model = Page3LayoutModel(
+        LayoutLMv3Model(config),
+        len(checkpoint["roles"]),
+        checkpoint.get("head_dropout", 0.3),
+    )
     model.load_state_dict(checkpoint["model_state"])
     model.to(arguments.device).eval()
     tokenizer = LayoutLMv3TokenizerFast.from_pretrained(arguments.checkpoint)
@@ -192,6 +393,18 @@ def main():
     train_parser.add_argument("--epochs", type=int, default=50)
     train_parser.add_argument("--learning-rate", type=float, default=2e-5)
     train_parser.add_argument("--seed", type=int, default=42)
+    train_parser.add_argument("--validation-dataset", type=Path, required=True)
+    train_parser.add_argument("--weight-decay", type=float, default=0.03)
+    train_parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    train_parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    train_parser.add_argument("--head-dropout", type=float, default=0.3)
+    train_parser.add_argument("--early-stopping-patience", type=int, default=5)
+    train_parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=1e-4,
+    )
+    train_parser.add_argument("--threshold", type=float, default=0.5)
     predict_parser = commands.add_parser("predict", help="Dự đoán từ annotation_manifest.json")
     predict_parser.add_argument("--manifest", type=Path, required=True)
     predict_parser.add_argument("--checkpoint", type=Path, required=True)
@@ -199,9 +412,9 @@ def main():
     predict_parser.add_argument("--threshold", type=float, default=0.5)
     predict_parser.add_argument(
         "--link-mode",
-        choices=["learned", "row", "both"],
-        default="learned",
-        help="Cách tạo liên kết KEY → VALUE.",
+        choices=["row"],
+        default="row",
+        help="Cách tạo liên kết KEY → VALUE; pipeline chỉ dùng row-link.",
     )
     for command in [train_parser, predict_parser]:
         command.add_argument("--device", default="cpu")
