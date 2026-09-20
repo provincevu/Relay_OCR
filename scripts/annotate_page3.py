@@ -1,7 +1,7 @@
 # Mục đích: tạo giao diện annotation KEY/VALUE từ Rule Induction page 3.
 # Chức năng: tái sử dụng template và thuật toán gốc, bổ sung thao tác annotation.
 # Luồng xử lý: HTML OCR hiện có → lọc ảnh tùy chọn → snapshot region → giao diện mở rộng.
-# Cấu hình/parameter: thư mục chứa rule_induction.html và tùy chọn folder ảnh page 3+.
+# Cấu hình/parameter: thư mục chứa HTML Rule Induction theo split và tùy chọn folder ảnh page 3+.
 # Quan hệ: đọc template của test_rule_induction_page3_plus.py và JS mở rộng.
 # Input/output: đọc HTML/OCR; ghi annotate_page3.html và annotation_manifest.json.
 # Contract: giữ nguyên ID, text, box, score của OCR; không chạy lại model OCR.
@@ -83,6 +83,26 @@ def _filter_pages_by_image_directory(pages, directory, image_directory):
     return selected_pages
 
 
+def _source_html_path(directory, image_directory):
+    """Chọn HTML Rule Induction tương ứng với train, val hoặc test."""
+    if image_directory is not None:
+        split_name = image_directory.resolve().name
+        split_html = directory / f"rule_induction_{split_name}.html"
+        if split_html.is_file():
+            return split_html
+    legacy_html = directory / "rule_induction.html"
+    if legacy_html.is_file():
+        return legacy_html
+    expected_name = (
+        f"rule_induction_{image_directory.resolve().name}.html"
+        if image_directory is not None
+        else "rule_induction.html"
+    )
+    raise FileNotFoundError(
+        f"Không tìm thấy HTML Rule Induction: {directory / expected_name}"
+    )
+
+
 def main():
     """Tạo giao diện annotation từ đúng snapshot OCR đã dùng trong HTML cũ."""
     parser = argparse.ArgumentParser()
@@ -90,7 +110,10 @@ def main():
     parser.add_argument("--image-directory", type=Path)
     arguments = parser.parse_args()
     directory = arguments.rule_output_directory.resolve()
-    source_html = (directory / "rule_induction.html").read_text(encoding="utf-8")
+    source_html = _source_html_path(
+        directory,
+        arguments.image_directory,
+    ).read_text(encoding="utf-8")
     pages_source = source_html.split("const pages = ", 1)[1].lstrip()
     pages, _ = json.JSONDecoder().raw_decode(pages_source)
     if arguments.image_directory is not None:

@@ -2364,9 +2364,8 @@ def _process_image(
     return page, recognition_cache_hit
 
 
-def _write_html(pages, output_directory, batch_started, processed_count, total_count):
+def _write_html(pages, html_path, batch_started, processed_count, total_count):
     """Ghi HTML và in thống kê cho các page đã xử lý."""
-    html_path = output_directory / "rule_induction.html"
     html_started = perf_counter()
     html_path.write_text(
         build_html(pages),
