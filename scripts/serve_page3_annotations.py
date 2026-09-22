@@ -4,7 +4,8 @@
 # Cấu hình/parameter: thư mục output, tùy chọn folder ảnh và --port, mặc định 8001.
 # Quan hệ: phục vụ output của annotate_page3.py cho train_page3_text_layout.py.
 # Input/output: JSON phiên bản 1, pages ánh xạ image_name → phiếu đã xác nhận.
-# Contract: không lưu draft; chỉ ghi snapshot OCR khớp manifest và relation hợp lệ.
+# Contract: không lưu draft; role hợp lệ được kiểm tra; relation chỉ nối KEY → VALUE.
+# Tương thích dữ liệu cũ: cho phép inline KEY + VALUE trong cùng một region.
 
 import argparse
 import json
@@ -15,7 +16,18 @@ from pathlib import Path
 from threading import Lock
 
 
-LABELS = {"KEY", "VALUE", "OTHER", "UNLABELED"}
+PRIMARY_ROLES = {
+    "KEY",
+    "VALUE",
+    "HEADER",
+    "FIELD_TABLE",
+    "NOTE",
+    "PAGE_NUMBER",
+    "FORM_NUMBER",
+    "OTHER",
+}
+LABELS = PRIMARY_ROLES | {"UNLABELED"}
+LEGACY_INLINE_ROLES = {"KEY", "VALUE"}
 
 
 def _filter_manifest_pages(pages, directory, image_directory):
@@ -90,8 +102,21 @@ class AnnotationRequestHandler(SimpleHTTPRequestHandler):
         if set(annotations) != region_ids:
             raise ValueError("Annotation phải có đủ và đúng ID region của phiếu.")
         for roles in annotations.values():
-            if not roles or not set(roles) <= LABELS:
-                raise ValueError("Annotation chứa nhãn không hợp lệ.")
+            if (
+                not isinstance(roles, list)
+                or not roles
+                or not set(roles) <= LABELS
+                or len(set(roles)) != len(roles)
+                or (
+                    len(roles) > 1
+                    and set(roles) != LEGACY_INLINE_ROLES
+                )
+            ):
+                raise ValueError(
+                    "Role của region không hợp lệ. Cho phép một role "
+                    "hoặc inline legacy KEY + VALUE; danh sách role hợp lệ: "
+                    f"{', '.join(sorted(LABELS))}."
+                )
             if ("UNLABELED" in roles or "OTHER" in roles) and len(roles) != 1:
                 raise ValueError("OTHER và UNLABELED phải đứng riêng.")
         linked = {role: set() for role in ["KEY", "VALUE"]}
