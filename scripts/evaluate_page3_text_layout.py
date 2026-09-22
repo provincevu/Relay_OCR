@@ -8,10 +8,13 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import torch
 from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3TokenizerFast
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.page3_layout_model import (
     Page3LayoutModel,

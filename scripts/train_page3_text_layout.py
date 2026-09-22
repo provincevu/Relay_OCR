@@ -348,6 +348,23 @@ def predict(arguments):
     tokenizer = LayoutLMv3TokenizerFast.from_pretrained(arguments.checkpoint)
     manifest = json.loads(arguments.manifest.read_text(encoding="utf-8"))
     predictions = []
+
+    def add_link_texts(prediction):
+        """Thêm text region để viewer hiển thị link thay vì chỉ hiện ID."""
+        region_by_id = {
+            region["id"]: region
+            for region in prediction["regions"]
+        }
+        prediction["links"] = [
+            {
+                **link,
+                "key_text": region_by_id[link["key_region_id"]]["text"],
+                "value_text": region_by_id[link["value_region_id"]]["text"],
+            }
+            for link in prediction["links"]
+        ]
+        return prediction
+
     with torch.no_grad():
         for record in manifest["pages"]:
             page = prepare_page({
@@ -364,6 +381,7 @@ def predict(arguments):
                 arguments.threshold,
                 arguments.link_mode,
             )
+            prediction = add_link_texts(prediction)
             # OTHER không đi cùng nhãn thực thể; KEY/VALUE cùng ID vẫn hợp lệ cho inline.
             for region in prediction["regions"]:
                 region["labels"] = [role for role in region["labels"] if role != "OTHER"] or ["OTHER"]
@@ -371,12 +389,27 @@ def predict(arguments):
                 "pdf_name": record["pdfName"],
                 "physical_page": record["physicalPage"],
                 "image_name": record["imageName"],
+                "image_path": record["imageName"],
+                "image_width": record["width"],
+                "image_height": record["height"],
                 "ocr_fingerprint": record["ocrFingerprint"],
+                "recognition_source": "annotation manifest",
                 **prediction,
             })
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(
-        json.dumps({"pages": predictions}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                "schema_version": 1,
+                "link_mode": "row",
+                "threshold": arguments.threshold,
+                "checkpoint": str(arguments.checkpoint),
+                "device": arguments.device,
+                "pages": predictions,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
     print(f"Đã lưu dự đoán {len(predictions)} phiếu: {arguments.output}")
