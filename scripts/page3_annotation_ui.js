@@ -9,6 +9,10 @@ const annotation = {
     mode: "sample", sessions: new Map(), activePage: -1,
     saved: {}, editing: null, dirty: false, frozenPairs: [], lockedRows: [],
 };
+const explicitRoles = [
+    "HEADER", "FIELD_TABLE", "NOTE", "PAGE_NUMBER", "FORM_NUMBER",
+    "OTHER", "UNLABELED",
+];
 const annotationStyle = document.createElement("style");
 annotationStyle.textContent = `
     .annotation-toolbar{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:10px}
@@ -19,6 +23,11 @@ annotationStyle.textContent = `
     .ocr-box.annotation-selected{outline:4px solid #eab308;outline-offset:3px}
     .ocr-box.annotation-unlabeled{border-color:#475569;border-style:dashed;background:#47556945}
     .ocr-box.annotation-other{border-color:#94a3b8;background:#94a3b81a}
+    .ocr-box.annotation-header{border-color:#7c3aed;background:#7c3aed24}
+    .ocr-box.annotation-field_table{border-color:#0891b2;background:#0891b224}
+    .ocr-box.annotation-note{border-color:#ca8a04;background:#ca8a0424}
+    .ocr-box.annotation-page_number{border-color:#db2777;background:#db277724}
+    .ocr-box.annotation-form_number{border-color:#ea580c;background:#ea580c24}
     .ocr-box.annotation-frozen-key,.ocr-box.annotation-frozen-value{
         border-color:#64748b;background:#64748b2b;border-style:dotted;opacity:.8}
     .ocr-box.annotation-locked-row{box-shadow:inset 0 0 0 2px #94a3b8;background:#94a3b81a}
@@ -38,8 +47,8 @@ annotationStyle.textContent = `
     header{padding:14px 24px}.actions{margin-top:6px}
 `;
 document.head.appendChild(annotationStyle);
-document.title = "Annotation KEY · VALUE";
-document.querySelector("header h1").textContent = "Annotation page 3 · KEY / VALUE";
+document.title = "Annotation page 3 · KEY / VALUE / role";
+document.querySelector("header h1").textContent = "Annotation page 3 · KEY / VALUE / role";
 document.querySelector("header p").textContent = "Rule Induction từ mẫu; lưu annotation theo ID region.";
 const annotationToolbar = document.createElement("div");
 annotationToolbar.className = "annotation-toolbar";
@@ -47,6 +56,11 @@ annotationToolbar.innerHTML = `
     <label>Chế độ <select id="annotationMode">
         <option value="sample">Chọn nhóm cho mẫu</option>
         <option value="inspect">Kiểm tra / sửa cặp</option>
+        <option value="HEADER">Đánh dấu HEADER</option>
+        <option value="FIELD_TABLE">Đánh dấu FIELD_TABLE</option>
+        <option value="NOTE">Đánh dấu NOTE</option>
+        <option value="PAGE_NUMBER">Đánh dấu PAGE_NUMBER</option>
+        <option value="FORM_NUMBER">Đánh dấu FORM_NUMBER</option>
         <option value="UNLABELED">Đánh dấu UNLABELED</option>
         <option value="OTHER">Đánh dấu OTHER</option>
     </select></label>
@@ -63,6 +77,11 @@ annotationToolbar.innerHTML = `
 `;
 document.querySelector(".control-panel").appendChild(annotationToolbar);
 document.querySelector(".legend").insertAdjacentHTML("beforeend", `
+    <span class="legend-item"><span class="swatch" style="background:#7c3aed24;border-color:#7c3aed"></span>HEADER</span>
+    <span class="legend-item"><span class="swatch" style="background:#0891b224;border-color:#0891b2"></span>FIELD_TABLE</span>
+    <span class="legend-item"><span class="swatch" style="background:#ca8a0424;border-color:#ca8a04"></span>NOTE</span>
+    <span class="legend-item"><span class="swatch" style="background:#db277724;border-color:#db2777"></span>PAGE_NUMBER</span>
+    <span class="legend-item"><span class="swatch" style="background:#ea580c24;border-color:#ea580c"></span>FORM_NUMBER</span>
     <span class="legend-item"><span class="swatch frozen"></span>Đã khóa từ rule trước</span>
     <span class="legend-item"><span class="swatch locked-row"></span>Hàng Y đã khóa</span>
 `);
@@ -237,7 +256,10 @@ refreshBoxStyles = function () {
     for (const box of boxLayer.children) {
         const id = box.dataset.regionId;
         const roles = labels[id] || [];
-        for (const role of ["KEY", "VALUE", "UNLABELED", "OTHER"]) {
+        for (const role of [
+            "KEY", "VALUE", "HEADER", "FIELD_TABLE", "NOTE", "PAGE_NUMBER",
+            "FORM_NUMBER", "UNLABELED", "OTHER",
+        ]) {
             box.classList.toggle(`annotation-${role.toLowerCase()}`, roles.includes(role));
         }
         box.classList.toggle("annotation-selected", annotation.selected.has(id) || groupIds.has(id));
@@ -661,7 +683,7 @@ loadPage = function (pageIndex) {
             throw new Error("Annotation đã lưu thuộc snapshot OCR khác; không được ghép với ID hiện tại.");
         }
         annotation.labels = Object.fromEntries(Object.entries(saved.annotations).filter(
-            ([, labels]) => labels.every(label => ["OTHER", "UNLABELED"].includes(label))
+            ([, labels]) => labels.every(label => explicitRoles.includes(label))
         ));
         state.examples = saved.relations.filter(pair => pair.source === "manual").map(pairFromRecord);
         state.predictions = saved.relations.filter(pair => pair.source === "rule").map(pairFromRecord);
@@ -723,7 +745,7 @@ confirmResults = async function () {
         if (!response.ok) throw new Error("Server chưa lưu được annotation.");
         annotation.saved[page.imageName] = await response.json();
         annotation.labels = Object.fromEntries(Object.entries(labels).filter(
-            ([, roles]) => roles.every(role => ["OTHER", "UNLABELED"].includes(role))
+            ([, roles]) => roles.every(role => explicitRoles.includes(role))
         ));
         annotation.dirty = false;
         state.confirmed = true;
