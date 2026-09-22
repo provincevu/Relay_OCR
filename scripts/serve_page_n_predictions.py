@@ -282,11 +282,6 @@ function renderRegions(page) {
         box.style.width = percent(region.bbox[2] - region.bbox[0], page.image_width);
         box.style.height = percent(region.bbox[3] - region.bbox[1], page.image_height);
         box.title = `${region.id} · ${region.text}`;
-        const badge = document.createElement("span");
-        badge.className = "region-label";
-        const displayLabel = label === "INLINE" ? "KEY/VALUE" : label;
-        badge.textContent = `${region.id} · ${displayLabel}`;
-        box.appendChild(badge);
         box.addEventListener("click", () => selectRegion(region));
         stage.appendChild(box);
     }
