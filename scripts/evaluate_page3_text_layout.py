@@ -1,5 +1,5 @@
 # Mục đích: đánh giá checkpoint LayoutLMv3 text + bbox trên dataset page 3+.
-# Chức năng: đo nhận diện KEY/VALUE/OTHER và row-link KEY → VALUE.
+# Chức năng: đo nhận diện các role region và row-link KEY → VALUE.
 # Luồng xử lý: tải checkpoint → dự đoán từng phiếu → so sánh region/cạnh với nhãn thật → ghi metric.
 # Cấu hình/parameter: dataset, checkpoint, device, threshold và output nhận từ command line.
 # Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.train_page3_text_layout.
@@ -21,10 +21,10 @@ from scripts.page3_layout_model import (
     encode_page,
     predict_page,
 )
-from scripts.train_page3_text_layout import prepare_page
+from scripts.train_page3_text_layout import ROLES, prepare_page
 
 
-EVALUATED_ROLES = ["KEY", "VALUE", "OTHER"]
+EVALUATED_ROLES = ROLES
 
 
 def set_counts(gold, predicted):
@@ -56,9 +56,9 @@ def metric_from_counts(true_positive, false_positive, false_negative):
 
 
 def normalize_prediction_labels(labels):
-    """Giữ OTHER riêng với KEY hoặc VALUE giống pipeline predict."""
+    """Giữ OTHER riêng với mọi role chính giống pipeline predict."""
     labels = set(labels)
-    if labels.intersection({"KEY", "VALUE"}):
+    if labels.intersection(set(ROLES) - {"OTHER"}):
         labels.discard("OTHER")
     return labels or {"OTHER"}
 
