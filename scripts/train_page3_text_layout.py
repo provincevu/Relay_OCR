@@ -1,5 +1,5 @@
 # Mục đích: fine-tune LayoutLMv3 chỉ dùng text + bbox từ annotation page 3.
-# Chức năng: học KEY/VALUE/OTHER; liên kết KEY → VALUE dùng row-link.
+# Chức năng: học KEY/VALUE và các role vùng; liên kết KEY → VALUE dùng row-link.
 # Luồng xử lý: phiếu đã xác nhận → mã hóa region → role loss → checkpoint tốt nhất.
 # Cấu hình/parameter: python -m scripts.train_page3_text_layout --help.
 # Quan hệ: dùng annotations.json của serve_page3_annotations và model B hiện có.
@@ -30,7 +30,16 @@ from scripts.page3_layout_model import (
 )
 
 
-ROLES = ["KEY", "VALUE", "OTHER"]
+ROLES = [
+    "KEY",
+    "VALUE",
+    "HEADER",
+    "FIELD_TABLE",
+    "NOTE",
+    "PAGE_NUMBER",
+    "FORM_NUMBER",
+    "OTHER",
+]
 
 
 def prepare_page(record):
@@ -53,7 +62,7 @@ def masked_training_loss(role_logits, page):
         labels_set = set(labels_for_region)
         if (
             "UNLABELED" not in labels_set
-            and not labels_set.intersection({"KEY", "VALUE", "OTHER"})
+            and not labels_set.intersection(ROLES)
         ):
             labels_set = {"OTHER"}
         normalized_labels.append(labels_set)
@@ -95,9 +104,9 @@ def _f1_from_counts(counts):
 
 
 def _normalize_prediction_labels(labels):
-    """Không cho OTHER đi cùng KEY/VALUE trong metric."""
+    """Không cho OTHER đi cùng role chính trong metric."""
     labels = set(labels)
-    if labels.intersection({"KEY", "VALUE"}):
+    if labels.intersection(set(ROLES) - {"OTHER"}):
         labels.discard("OTHER")
     return labels or {"OTHER"}
 
@@ -382,7 +391,7 @@ def predict(arguments):
                 arguments.link_mode,
             )
             prediction = add_link_texts(prediction)
-            # OTHER không đi cùng nhãn thực thể; KEY/VALUE cùng ID vẫn hợp lệ cho inline.
+            # OTHER không đi cùng role chính; KEY/VALUE cùng ID vẫn hợp lệ cho inline.
             for region in prediction["regions"]:
                 region["labels"] = [role for role in region["labels"] if role != "OTHER"] or ["OTHER"]
             predictions.append({
