@@ -1,10 +1,10 @@
 # Mục đích: fine-tune LayoutLMv3 chỉ dùng text + bbox từ annotation page 3.
-# Chức năng: học KEY/VALUE và các role vùng; liên kết KEY → VALUE dùng row-link.
+# Chức năng: học một role cho mỗi region; liên kết KEY → VALUE dùng row-link.
 # Luồng xử lý: phiếu đã xác nhận → mã hóa region → role loss → checkpoint tốt nhất.
 # Cấu hình/parameter: python -m scripts.train_page3_text_layout --help.
 # Quan hệ: dùng annotations.json của serve_page3_annotations và model B hiện có.
 # Input/output: train nhận dataset đã chia bên ngoài; predict nhận manifest OCR.
-# Contract: UNLABELED chỉ làm ngữ cảnh, không là target hoặc cạnh âm/dương.
+# Contract: UNLABELED và inline KEY VALUE legacy không là target role single class.
 # Contract: không có learned-link head/loss; relation production là row-link.
 # Contract: không chia train/test/val; visual_embed=False, không phải bản distilled.
 
@@ -53,36 +53,41 @@ def prepare_page(record):
     }
 
 
+def _is_trainable_annotation(labels):
+    """Kiểm tra annotation có đúng một role để đưa vào single-class loss."""
+    return "UNLABELED" not in labels and set(labels) != {"KEY", "VALUE"}
+
+
 def masked_training_loss(role_logits, page):
-    """Tính role loss và bỏ qua region UNLABELED."""
+    """Tính single-class role loss và bỏ qua nhãn không thể biểu diễn."""
     region_ids = [region["id"] for region in page["regions"]]
     labels = [page["annotations"][region_id] for region_id in region_ids]
-    normalized_labels = []
+    target_indices = []
+    known_values = []
     for labels_for_region in labels:
         labels_set = set(labels_for_region)
-        if (
-            "UNLABELED" not in labels_set
-            and not labels_set.intersection(ROLES)
-        ):
-            labels_set = {"OTHER"}
-        normalized_labels.append(labels_set)
+        known_values.append(_is_trainable_annotation(labels_set))
+        target_role = next(
+            (role for role in ROLES if role in labels_set),
+            "OTHER",
+        )
+        target_indices.append(ROLES.index(target_role))
     known = torch.tensor(
-        ["UNLABELED" not in roles for roles in normalized_labels],
+        known_values,
         dtype=torch.bool,
         device=role_logits.device,
     )
-    role_targets = role_logits.new_tensor([
-        [float(role in labels_for_region) for role in ROLES]
-        for labels_for_region in normalized_labels
-    ])
-    # Tổng rỗng vẫn có gradient bằng 0 khi toàn bộ trang bị bỏ qua.
-    role_losses = torch.nn.functional.binary_cross_entropy_with_logits(
-        role_logits,
-        role_targets,
-        reduction="none",
+    role_targets = torch.tensor(
+        target_indices,
+        dtype=torch.long,
+        device=role_logits.device,
     )
-    role_loss = role_losses[known].sum() / (known.sum() * len(ROLES)).clamp(min=1)
-    return role_loss
+    if not known.any():
+        return role_logits.sum() * 0
+    return torch.nn.functional.cross_entropy(
+        role_logits[known],
+        role_targets[known],
+    )
 
 
 def _update_counts(counts, gold, predicted):
@@ -131,7 +136,7 @@ def validation_metrics(pages, model, tokenizer, device, threshold):
             known_ids = {
                 region["id"]
                 for region in page["regions"]
-                if "UNLABELED" not in labels[region["id"]]
+                if _is_trainable_annotation(labels[region["id"]])
             }
             predicted_labels = {
                 region["id"]: _normalize_prediction_labels(region["labels"])
@@ -187,7 +192,10 @@ def _load_pages(dataset_path):
         prepare_page(record)
         for record in dataset["pages"].values()
         if record["confirmed_at"]
-        and any("UNLABELED" not in labels for labels in record["annotations"].values())
+        and any(
+            _is_trainable_annotation(labels)
+            for labels in record["annotations"].values()
+        )
     ]
 
 
@@ -210,11 +218,17 @@ def _optimizer_parameters(model, weight_decay):
 
 def _save_checkpoint(output, tokenizer, model, epoch, metrics, head_dropout):
     """Lưu tokenizer và checkpoint tốt nhất hiện tại."""
+    if (output / "model.pt").exists():
+        raise FileExistsError(
+            f"Checkpoint đã tồn tại: {output / 'model.pt'}. "
+            "Hãy chọn thư mục output mới cho model single class."
+        )
     output.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(output)
     torch.save(
         {
             "roles": ROLES,
+            "role_mode": "single_class",
             "encoder_config": model.encoder.config.to_dict(),
             "model_state": model.state_dict(),
             "head_dropout": head_dropout,

@@ -1,5 +1,5 @@
 # Mục đích: LayoutLMv3 chỉ dùng text + bbox cho page 3+.
-# Chức năng: mã hóa OCR, dự đoán đa nhãn region và row-link giữa các region.
+# Chức năng: mã hóa OCR, dự đoán một role cho mỗi region và row-link giữa các region.
 # Luồng xử lý: chia token thành chunk → encoder → gộp region → role head.
 # Cấu hình/parameter: variant A/B, checkpoint encoder, danh sách role.
 # Quan hệ: dùng chung bởi lệnh train và compare trong compare_page3_layout.
@@ -131,10 +131,19 @@ def encode_page(page, tokenizer, image_processor, variant, device):
 
 
 def training_loss(role_logits, page):
-    """Tính role loss đa nhãn cho KEY/VALUE/OTHER."""
-    roles = role_logits.new_tensor(page["role_labels"])
-    role_loss = nn.functional.binary_cross_entropy_with_logits(role_logits, roles)
-    return role_loss
+    """Tính single-class loss từ chỉ số role của mỗi region."""
+    role_targets = torch.as_tensor(
+        page["role_labels"],
+        dtype=torch.long,
+        device=role_logits.device,
+    )
+    known = role_targets != -100
+    if not known.any():
+        return role_logits.sum() * 0
+    return nn.functional.cross_entropy(
+        role_logits[known],
+        role_targets[known],
+    )
 
 
 def same_row_score(first, second):
@@ -182,21 +191,19 @@ def row_links(regions, source_role, target_role, source_field, target_field):
 
 
 def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
-    """Trả vai trò và cạnh row-link dựa trên role dự đoán."""
+    """Chọn role có score cao nhất và tạo cạnh row-link."""
     if link_mode != "row":
         raise ValueError("Pipeline hiện tại chỉ hỗ trợ row-link.")
     role_logits = model(encoded, len(page["regions"]))
-    role_scores = role_logits.sigmoid().cpu().tolist()
+    role_scores = role_logits.softmax(dim=-1).cpu().tolist()
     regions = []
     for region, scores in zip(page["regions"], role_scores, strict=True):
+        best_role_index = max(range(len(scores)), key=scores.__getitem__)
         regions.append({
             "id": region["id"],
             "text": region["text"],
             "bbox": region["bbox"],
-            "labels": [
-                role for role, score in zip(roles, scores, strict=True)
-                if score >= threshold
-            ] or ["OTHER"],
+            "labels": [roles[best_role_index]],
             "scores": dict(zip(roles, scores, strict=True)),
         })
     row_key_value_links = row_links(

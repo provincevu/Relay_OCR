@@ -4,7 +4,7 @@
 # Cấu hình/parameter: dataset, checkpoint, device, threshold và output nhận từ command line.
 # Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.train_page3_text_layout.
 # Input/output: nhận annotations.json cùng thư mục checkpoint; ghi evaluation JSON.
-# Contract: bỏ qua region UNLABELED; liên kết nhiều region được tính theo từng cạnh KEY → VALUE.
+# Contract: bỏ qua region UNLABELED và inline legacy; liên kết nhiều region được tính theo từng cạnh KEY → VALUE.
 
 import argparse
 import json
@@ -103,7 +103,10 @@ def evaluate(arguments):
             known_ids = {
                 region["id"]
                 for region in page["regions"]
-                if "UNLABELED" not in labels[region["id"]]
+                if (
+                    "UNLABELED" not in labels[region["id"]]
+                    and set(labels[region["id"]]) != {"KEY", "VALUE"}
+                )
             }
             ignored_unlabeled += len(page["regions"]) - len(known_ids)
             encoded = encode_page(
