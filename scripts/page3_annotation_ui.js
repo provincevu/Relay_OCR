@@ -72,7 +72,7 @@ annotationToolbar.innerHTML = `
     <button id="clearSelection" class="secondary">Hủy chọn</button>
     <button id="undoAnnotation" class="secondary">Hoàn tác annotation</button>
     <button id="editConfirmed" class="secondary">Sửa phiếu đã xác nhận</button>
-    <span>Phím N: sang page sau</span>
+    <span>Phím N: page sau · E: sửa phiếu · S: xác nhận</span>
     <div id="frozenRuleSummary" role="status"></div>
     <div id="groupSummary" role="status" aria-live="polite"></div>
 `;
@@ -606,11 +606,21 @@ document.addEventListener("keydown", event => {
         || target instanceof HTMLTextAreaElement
         || target instanceof HTMLSelectElement
         || target.isContentEditable;
-    if (isEditing || event.ctrlKey || event.altKey || event.metaKey
-        || event.key.toLowerCase() !== "n"
-        || currentPageIndex >= pages.length - 1) return;
-    event.preventDefault();
-    loadPage(currentPageIndex + 1);
+    if (isEditing || event.ctrlKey || event.altKey || event.metaKey) return;
+    const key = event.key.toLowerCase();
+    if (key === "n" && currentPageIndex < pages.length - 1) {
+        event.preventDefault();
+        loadPage(currentPageIndex + 1);
+    } else if (key === "e") {
+        const editButton = document.getElementById("editConfirmed");
+        if (!editButton.disabled) {
+            event.preventDefault();
+            editButton.click();
+        }
+    } else if (key === "s" && !confirmResultButton.disabled) {
+        event.preventDefault();
+        confirmResultButton.click();
+    }
 });
 
 let drag = null;
