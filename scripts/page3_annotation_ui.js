@@ -72,6 +72,7 @@ annotationToolbar.innerHTML = `
     <button id="clearSelection" class="secondary">Hủy chọn</button>
     <button id="undoAnnotation" class="secondary">Hoàn tác annotation</button>
     <button id="editConfirmed" class="secondary">Sửa phiếu đã xác nhận</button>
+    <span>Phím N: sang page sau</span>
     <div id="frozenRuleSummary" role="status"></div>
     <div id="groupSummary" role="status" aria-live="polite"></div>
 `;
@@ -597,6 +598,19 @@ modeSelect.addEventListener("change", () => {
         : annotation.mode === "inspect"
             ? "Bấm bbox hoặc Sửa nhóm trong danh sách để kiểm tra cặp."
             : `Click hoặc kéo khung để chọn region; Shift + kéo để thêm vùng. Bấm Gán ${annotation.mode} để áp dụng.`;
+});
+
+document.addEventListener("keydown", event => {
+    const target = event.target;
+    const isEditing = target instanceof HTMLInputElement
+        || target instanceof HTMLTextAreaElement
+        || target instanceof HTMLSelectElement
+        || target.isContentEditable;
+    if (isEditing || event.ctrlKey || event.altKey || event.metaKey
+        || event.key.toLowerCase() !== "n"
+        || currentPageIndex >= pages.length - 1) return;
+    event.preventDefault();
+    loadPage(currentPageIndex + 1);
 });
 
 let drag = null;
