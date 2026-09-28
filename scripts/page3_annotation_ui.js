@@ -72,7 +72,7 @@ annotationToolbar.innerHTML = `
     <button id="clearSelection" class="secondary">Hủy chọn</button>
     <button id="undoAnnotation" class="secondary">Hoàn tác annotation</button>
     <button id="editConfirmed" class="secondary">Sửa phiếu đã xác nhận</button>
-    <span>Phím N: page sau · E: sửa phiếu · S: xác nhận</span>
+    <span>Phím N: page sau · Q: gán nhãn · E: sửa phiếu · S: xác nhận</span>
     <div id="frozenRuleSummary" role="status"></div>
     <div id="groupSummary" role="status" aria-live="polite"></div>
 `;
@@ -617,6 +617,9 @@ document.addEventListener("keydown", event => {
             event.preventDefault();
             editButton.click();
         }
+    } else if (key === "q" && !applyButton.disabled) {
+        event.preventDefault();
+        applyButton.click();
     } else if (key === "s" && !confirmResultButton.disabled) {
         event.preventDefault();
         confirmResultButton.click();
