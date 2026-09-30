@@ -8,6 +8,7 @@ const annotation = {
     selected: new Set(), groups: [], labels: {}, history: [],
     mode: "sample", sessions: new Map(), activePage: -1,
     saved: {}, editing: null, dirty: false, frozenPairs: [], lockedRows: [],
+    keywordSuggestions: new Set(),
 };
 const explicitRoles = [
     "HEADER", "FIELD_TABLE", "NOTE", "PAGE_NUMBER", "FORM_NUMBER",
@@ -17,6 +18,7 @@ const annotationStyle = document.createElement("style");
 annotationStyle.textContent = `
     .annotation-toolbar{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:10px}
     .annotation-toolbar select{padding:8px;font:inherit;border-radius:7px}
+    .annotation-toolbar input{min-width:280px;padding:8px;font:inherit;border-radius:7px;border:1px solid #cbd5e1}
     .annotation-toolbar button{padding:8px 10px}
     .annotation-toolbar button:disabled{opacity:.45;cursor:not-allowed}
     #groupSummary{width:100%;font-size:14px;color:#334155;line-height:1.5}
@@ -28,6 +30,7 @@ annotationStyle.textContent = `
     .ocr-box.annotation-note{border-color:#ca8a04;background:#ca8a0424}
     .ocr-box.annotation-page_number{border-color:#db2777;background:#db277724}
     .ocr-box.annotation-form_number{border-color:#ea580c;background:#ea580c24}
+    .ocr-box.annotation-keyword-suggestion{outline:3px dashed #f97316;outline-offset:2px}
     .ocr-box.annotation-frozen-key,.ocr-box.annotation-frozen-value{
         border-color:#64748b;background:#64748b2b;border-style:dotted;opacity:.8}
     .ocr-box.annotation-locked-row{box-shadow:inset 0 0 0 2px #94a3b8;background:#94a3b81a}
@@ -64,6 +67,8 @@ annotationToolbar.innerHTML = `
         <option value="UNLABELED">Đánh dấu UNLABELED</option>
         <option value="OTHER">Đánh dấu OTHER</option>
     </select></label>
+    <input id="fieldTableKeywords" type="text" hidden
+        placeholder="Keyword FIELD_TABLE, cách nhau bằng dấu phẩy">
     <button id="commitGroup" class="secondary">Chốt nhóm 1</button>
     <button id="inlineGroup" class="secondary">Key-value trong cùng bbox</button>
     <button id="breakRule" class="secondary">Ngắt rule / Bảng mới</button>
@@ -87,6 +92,7 @@ document.querySelector(".legend").insertAdjacentHTML("beforeend", `
     <span class="legend-item"><span class="swatch locked-row"></span>Hàng Y đã khóa</span>
 `);
 const modeSelect = document.getElementById("annotationMode");
+const fieldTableKeywords = document.getElementById("fieldTableKeywords");
 const commitButton = document.getElementById("commitGroup");
 const inlineGroupButton = document.getElementById("inlineGroup");
 const breakRuleButton = document.getElementById("breakRule");
@@ -100,6 +106,37 @@ document.getElementById("imageStage").appendChild(dragBox);
 
 function allPairIds(pair) {
     return [...pair.key.regionIds, ...pair.value.regionIds];
+}
+
+function normalizedFieldTableKeyword(value) {
+    return String(value || "").normalize("NFC").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function fieldTableKeywordSet() {
+    return new Set(
+        fieldTableKeywords.value
+            .split(/[\n,;]+/)
+            .map(normalizedFieldTableKeyword)
+            .filter(Boolean),
+    );
+}
+
+function updateFieldTableSuggestions() {
+    annotation.keywordSuggestions.clear();
+    if (annotation.mode !== "FIELD_TABLE") return;
+    const keywords = fieldTableKeywordSet();
+    if (!keywords.size) return;
+    const occupiedIds = new Set(allPairs().flatMap(allPairIds));
+    const protectedRoles = new Set([
+        "FIELD_TABLE", "HEADER", "NOTE", "PAGE_NUMBER", "FORM_NUMBER",
+    ]);
+    for (const region of regions) {
+        const labels = annotation.labels[region.id] || [];
+        if (labels.some(role => protectedRoles.has(role)) || occupiedIds.has(region.id)) continue;
+        if (keywords.has(normalizedFieldTableKeyword(region.text))) {
+            annotation.keywordSuggestions.add(region.id);
+        }
+    }
 }
 
 function pairRowRange(pair) {
@@ -212,6 +249,9 @@ function visibleAnnotations(finalize = false) {
 updateButtons = function () {
     original.buttons();
     const selectedCount = annotation.selected.size;
+    const suggestionCount = annotation.mode === "FIELD_TABLE"
+        ? annotation.keywordSuggestions.size
+        : 0;
     const groupCount = annotation.groups.length;
     const isSample = annotation.mode === "sample";
     commitButton.disabled = state.confirmed || !isSample || !selectedCount;
@@ -219,8 +259,10 @@ updateButtons = function () {
     inlineGroupButton.disabled = state.confirmed || !isSample || groupCount > 0 || selectedCount !== 1;
     breakRuleButton.disabled = state.confirmed || !state.examples.length || groupCount > 0
         || selectedCount > 0 || Boolean(annotation.editing);
-    applyButton.disabled = state.confirmed || isSample || annotation.mode === "inspect" || !selectedCount;
-    applyButton.textContent = `Gán ${annotation.mode === "sample" || annotation.mode === "inspect" ? "nhãn" : annotation.mode}`;
+    applyButton.disabled = state.confirmed || isSample || annotation.mode === "inspect"
+        || !(selectedCount || suggestionCount);
+    applyButton.textContent = `Gán ${annotation.mode === "sample" || annotation.mode === "inspect" ? "nhãn" : annotation.mode}`
+        + (suggestionCount ? ` (${suggestionCount} gợi ý)` : "");
     clearAnnotationButton.disabled = state.confirmed || !selectedCount;
     undoAnnotationButton.disabled = !annotation.history.length || state.confirmed;
     document.getElementById("clearSelection").disabled = state.confirmed || !selectedCount;
@@ -234,7 +276,8 @@ updateButtons = function () {
     const unlabeledCount = Object.values(annotation.labels).filter(labels => labels.includes("UNLABELED")).length;
     document.getElementById("groupSummary").textContent =
         `${selectedCount} region đang chọn · ${unlabeledCount} UNLABELED chủ động · `
-        + `${visibleFrozenPairs().length} cặp đã ngắt rule · ${annotation.lockedRows.length} hàng Y đã khóa. ${groups}`;
+        + `${suggestionCount} gợi ý FIELD_TABLE · ${visibleFrozenPairs().length} cặp đã ngắt rule · `
+        + `${annotation.lockedRows.length} hàng Y đã khóa. ${groups}`;
     document.getElementById("frozenRuleSummary").textContent = visibleFrozenPairs().length
         ? `${visibleFrozenPairs().length} cặp đã khóa từ rule trước; `
             + `${annotation.lockedRows.length} hàng Y của mẫu cũ cũng bị loại khỏi rule mới.`
@@ -264,10 +307,12 @@ refreshBoxStyles = function () {
             box.classList.toggle(`annotation-${role.toLowerCase()}`, roles.includes(role));
         }
         box.classList.toggle("annotation-selected", annotation.selected.has(id) || groupIds.has(id));
+        box.classList.toggle("annotation-keyword-suggestion", annotation.keywordSuggestions.has(id));
         box.classList.toggle("annotation-frozen-key", frozenKeyIds.has(id));
         box.classList.toggle("annotation-frozen-value", frozenValueIds.has(id));
         box.classList.toggle("annotation-locked-row", isLockedRow(regionById.get(id)));
-        if (roles.length || annotation.selected.has(id) || groupIds.has(id)) {
+        if (roles.length || annotation.selected.has(id) || groupIds.has(id)
+            || annotation.keywordSuggestions.has(id)) {
             box.classList.remove("hidden-unused");
         }
         box.title = `${id} · ${roles.join("/") || "Chưa gán"} · ${regionById.get(id)?.text || ""}`;
@@ -354,6 +399,7 @@ recomputePreview = function () {
             return true;
         }).sort((a, b) => pairY(a) - pairY(b));
     }
+    updateFieldTableSuggestions();
     refreshBoxStyles(); renderLogicalBlocks(); renderLinks(); renderLists();
     renderRuleSummary(); updateSteps(); updateButtons();
     resultSection.hidden = !state.confirmed;
@@ -555,6 +601,10 @@ confirmInlineSelection = function () {
 
 function applySelectedLabel() {
     const ids = new Set(annotation.selected);
+    if (annotation.mode === "FIELD_TABLE") {
+        annotation.keywordSuggestions.forEach(id => ids.add(id));
+    }
+    if (!ids.size) return;
     const affected = allPairs().filter(pair => allPairIds(pair).some(id => ids.has(id)));
     if (affected.some(isLockedFrozenSample)) {
         instruction.textContent = "Region thuộc mẫu của rule đã ngắt; không thể đổi nhãn từ rule mới.";
@@ -574,6 +624,7 @@ function applySelectedLabel() {
     state.examples = state.examples.filter(pair => !affected.includes(pair));
     annotation.frozenPairs = annotation.frozenPairs.filter(pair => !affected.includes(pair));
     for (const id of ids) annotation.labels[id] = [annotation.mode];
+    annotation.keywordSuggestions.clear();
     annotation.groups = [];
     cancelGroupSelection(); recomputePreview();
     instruction.textContent = `Đã gán ${annotation.mode} cho ${ids.size} region. Có thể hoàn tác annotation.`;
@@ -592,12 +643,21 @@ undoAnnotationButton.addEventListener("click", () => {
 modeSelect.addEventListener("change", () => {
     cancelCurrentKey();
     annotation.mode = modeSelect.value;
+    fieldTableKeywords.hidden = annotation.mode !== "FIELD_TABLE";
+    updateFieldTableSuggestions();
     updateButtons();
     instruction.textContent = annotation.mode === "sample"
         ? "Click nhiều bbox hoặc kéo khung, rồi Chốt nhóm. Chọn đủ 2 nhóm KEY/VALUE sẽ tự xác nhận mẫu."
         : annotation.mode === "inspect"
             ? "Bấm bbox hoặc Sửa nhóm trong danh sách để kiểm tra cặp."
+            : annotation.mode === "FIELD_TABLE"
+                ? "Nhập keyword rồi kiểm tra các bbox được viền gợi ý. Chỉ khớp toàn bộ text của một bbox độc lập; bấm Q hoặc Gán nhãn để xác nhận."
             : `Click hoặc kéo khung để chọn region; Shift + kéo để thêm vùng. Bấm Gán ${annotation.mode} để áp dụng.`;
+});
+fieldTableKeywords.addEventListener("input", () => {
+    updateFieldTableSuggestions();
+    refreshBoxStyles();
+    updateButtons();
 });
 
 document.addEventListener("keydown", event => {
@@ -676,6 +736,7 @@ resetAll = function () {
     annotation.selected = new Set(); annotation.groups = []; annotation.labels = {};
     annotation.history = []; annotation.editing = null; annotation.frozenPairs = [];
     annotation.lockedRows = []; annotation.dirty = false;
+    annotation.keywordSuggestions.clear();
     original.reset();
     instruction.textContent = "Chọn một hoặc nhiều bbox rồi Chốt nhóm. Hai nhóm KEY/VALUE sẽ tự xác nhận mẫu.";
 };
