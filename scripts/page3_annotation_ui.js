@@ -14,6 +14,7 @@ const explicitRoles = [
     "HEADER", "FIELD_TABLE", "NOTE", "PAGE_NUMBER", "FORM_NUMBER",
     "OTHER", "UNLABELED",
 ];
+const suggestionRoles = new Set(["FIELD_TABLE", "PAGE_NUMBER", "FORM_NUMBER"]);
 const annotationStyle = document.createElement("style");
 annotationStyle.textContent = `
     .annotation-toolbar{display:flex;flex-wrap:wrap;gap:7px;align-items:center;margin-top:10px}
@@ -121,22 +122,42 @@ function fieldTableKeywordSet() {
     );
 }
 
-function updateFieldTableSuggestions() {
+function updateRoleSuggestions() {
     annotation.keywordSuggestions.clear();
-    if (annotation.mode !== "FIELD_TABLE") return;
-    const keywords = fieldTableKeywordSet();
-    if (!keywords.size) return;
+    if (!suggestionRoles.has(annotation.mode)) return;
     const occupiedIds = new Set(allPairs().flatMap(allPairIds));
     const protectedRoles = new Set([
         "FIELD_TABLE", "HEADER", "NOTE", "PAGE_NUMBER", "FORM_NUMBER",
     ]);
-    for (const region of regions) {
+    const eligibleRegions = regions.filter(region => {
         const labels = annotation.labels[region.id] || [];
-        if (labels.some(role => protectedRoles.has(role)) || occupiedIds.has(region.id)) continue;
-        if (keywords.has(normalizedFieldTableKeyword(region.text))) {
-            annotation.keywordSuggestions.add(region.id);
+        return !labels.some(role => protectedRoles.has(role))
+            && !occupiedIds.has(region.id);
+    });
+    if (annotation.mode === "FIELD_TABLE") {
+        const keywords = fieldTableKeywordSet();
+        if (!keywords.size) return;
+        for (const region of eligibleRegions) {
+            if (keywords.has(normalizedFieldTableKeyword(region.text))) {
+                annotation.keywordSuggestions.add(region.id);
+            }
         }
+        return;
     }
+    const hasAssignedRole = regions.some(region => (
+        annotation.labels[region.id] || []
+    ).includes(annotation.mode));
+    if (hasAssignedRole) return;
+    const orderedRegions = [...eligibleRegions].sort((first, second) => (
+        first.box[1] - second.box[1] || first.box[0] - second.box[0]
+    ));
+    const candidate = orderedRegions.find(region => {
+        const text = String(region.text || "");
+        return annotation.mode === "PAGE_NUMBER"
+            ? text.includes("/") && !text.includes("-")
+            : text.includes("/") && text.includes("-");
+    });
+    if (candidate) annotation.keywordSuggestions.add(candidate.id);
 }
 
 function pairRowRange(pair) {
@@ -249,7 +270,7 @@ function visibleAnnotations(finalize = false) {
 updateButtons = function () {
     original.buttons();
     const selectedCount = annotation.selected.size;
-    const suggestionCount = annotation.mode === "FIELD_TABLE"
+    const suggestionCount = suggestionRoles.has(annotation.mode)
         ? annotation.keywordSuggestions.size
         : 0;
     const groupCount = annotation.groups.length;
@@ -276,7 +297,8 @@ updateButtons = function () {
     const unlabeledCount = Object.values(annotation.labels).filter(labels => labels.includes("UNLABELED")).length;
     document.getElementById("groupSummary").textContent =
         `${selectedCount} region đang chọn · ${unlabeledCount} UNLABELED chủ động · `
-        + `${suggestionCount} gợi ý FIELD_TABLE · ${visibleFrozenPairs().length} cặp đã ngắt rule · `
+        + `${suggestionCount} gợi ý ${suggestionRoles.has(annotation.mode) ? annotation.mode : "role"} · `
+        + `${visibleFrozenPairs().length} cặp đã ngắt rule · `
         + `${annotation.lockedRows.length} hàng Y đã khóa. ${groups}`;
     document.getElementById("frozenRuleSummary").textContent = visibleFrozenPairs().length
         ? `${visibleFrozenPairs().length} cặp đã khóa từ rule trước; `
@@ -399,7 +421,7 @@ recomputePreview = function () {
             return true;
         }).sort((a, b) => pairY(a) - pairY(b));
     }
-    updateFieldTableSuggestions();
+    updateRoleSuggestions();
     refreshBoxStyles(); renderLogicalBlocks(); renderLinks(); renderLists();
     renderRuleSummary(); updateSteps(); updateButtons();
     resultSection.hidden = !state.confirmed;
@@ -601,7 +623,7 @@ confirmInlineSelection = function () {
 
 function applySelectedLabel() {
     const ids = new Set(annotation.selected);
-    if (annotation.mode === "FIELD_TABLE") {
+    if (suggestionRoles.has(annotation.mode)) {
         annotation.keywordSuggestions.forEach(id => ids.add(id));
     }
     if (!ids.size) return;
@@ -644,7 +666,7 @@ modeSelect.addEventListener("change", () => {
     cancelCurrentKey();
     annotation.mode = modeSelect.value;
     fieldTableKeywords.hidden = annotation.mode !== "FIELD_TABLE";
-    updateFieldTableSuggestions();
+    updateRoleSuggestions();
     updateButtons();
     instruction.textContent = annotation.mode === "sample"
         ? "Click nhiều bbox hoặc kéo khung, rồi Chốt nhóm. Chọn đủ 2 nhóm KEY/VALUE sẽ tự xác nhận mẫu."
@@ -652,10 +674,14 @@ modeSelect.addEventListener("change", () => {
             ? "Bấm bbox hoặc Sửa nhóm trong danh sách để kiểm tra cặp."
             : annotation.mode === "FIELD_TABLE"
                 ? "Nhập keyword rồi kiểm tra các bbox được viền gợi ý. Chỉ khớp toàn bộ text của một bbox độc lập; bấm Q hoặc Gán nhãn để xác nhận."
+            : annotation.mode === "PAGE_NUMBER"
+                ? "Bbox đầu tiên từ trên xuống có dấu / và không có dấu - sẽ được viền gợi ý; bấm Q hoặc Gán nhãn để xác nhận."
+            : annotation.mode === "FORM_NUMBER"
+                ? "Bbox đầu tiên từ trên xuống có cả dấu / và dấu - sẽ được viền gợi ý; bấm Q hoặc Gán nhãn để xác nhận."
             : `Click hoặc kéo khung để chọn region; Shift + kéo để thêm vùng. Bấm Gán ${annotation.mode} để áp dụng.`;
 });
 fieldTableKeywords.addEventListener("input", () => {
-    updateFieldTableSuggestions();
+    updateRoleSuggestions();
     refreshBoxStyles();
     updateButtons();
 });
