@@ -4,7 +4,7 @@
 # Cấu hình/parameter: python -m scripts.train_page3_text_layout --help.
 # Quan hệ: dùng annotations.json của serve_page3_annotations và model B hiện có.
 # Input/output: train nhận dataset đã chia bên ngoài; predict nhận manifest OCR.
-# Contract: UNLABELED và inline KEY VALUE legacy không là target role single class.
+# Contract: INLINE_KEY_VALUE là role single class; UNLABELED và inline KEY VALUE legacy không là target.
 # Contract: không có learned-link head/loss; relation production là row-link.
 # Contract: không chia train/test/val; visual_embed=False, không phải bản distilled.
 
@@ -38,6 +38,7 @@ ROLES = [
     "NOTE",
     "PAGE_NUMBER",
     "FORM_NUMBER",
+    "INLINE_KEY_VALUE",
     "OTHER",
 ]
 
@@ -405,7 +406,7 @@ def predict(arguments):
                 arguments.link_mode,
             )
             prediction = add_link_texts(prediction)
-            # OTHER không đi cùng role chính; KEY/VALUE cùng ID vẫn hợp lệ cho inline.
+            # OTHER không đi cùng role chính; dữ liệu inline legacy vẫn giữ tương thích.
             for region in prediction["regions"]:
                 region["labels"] = [role for role in region["labels"] if role != "OTHER"] or ["OTHER"]
             predictions.append({

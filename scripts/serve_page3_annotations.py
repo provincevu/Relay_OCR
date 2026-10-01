@@ -1,11 +1,11 @@
 # Mục đích: phục vụ giao diện và lưu dataset annotation page 3.
 # Chức năng: đọc/lưu phiếu đã xác nhận, giữ snapshot OCR và nhóm quan hệ.
 # Luồng xử lý: GET giao diện/dataset → lọc ảnh tùy chọn → POST một phiếu → ghi annotations.json.
-# Cấu hình/parameter: thư mục output, tùy chọn folder ảnh và --port, mặc định 8001.
+# Cấu hình/parameter: thư mục output, folder ảnh, file annotation và --port.
 # Quan hệ: phục vụ output của annotate_page3.py cho train_page3_text_layout.py.
 # Input/output: JSON phiên bản 1, pages ánh xạ image_name → phiếu đã xác nhận.
 # Contract: không lưu draft; role hợp lệ được kiểm tra; relation chỉ nối KEY → VALUE.
-# Tương thích dữ liệu cũ: cho phép inline KEY + VALUE trong cùng một region.
+# Tương thích dữ liệu cũ: cho phép inline KEY + VALUE cùng với INLINE_KEY_VALUE.
 
 import argparse
 import json
@@ -24,6 +24,7 @@ PRIMARY_ROLES = {
     "NOTE",
     "PAGE_NUMBER",
     "FORM_NUMBER",
+    "INLINE_KEY_VALUE",
     "OTHER",
 }
 LABELS = PRIMARY_ROLES | {"UNLABELED"}
@@ -164,6 +165,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output_directory", type=Path)
     parser.add_argument("--image-directory", type=Path)
+    parser.add_argument(
+        "--annotations-file",
+        type=Path,
+        default=Path("annotations.json"),
+    )
     parser.add_argument("--port", type=int, default=8001)
     arguments = parser.parse_args()
     directory = arguments.output_directory.resolve()
@@ -188,7 +194,7 @@ def main():
         partial(AnnotationRequestHandler, directory=str(directory)),
     )
     server.annotation_lock = Lock()
-    server.dataset_path = directory / "annotations.json"
+    server.dataset_path = (directory / arguments.annotations_file).resolve()
     server.pages = {page["imageName"]: page for page in manifest_pages}
     print(f"Giao diện: http://127.0.0.1:{arguments.port}/", flush=True)
     print(f"Dataset: {server.dataset_path}", flush=True)

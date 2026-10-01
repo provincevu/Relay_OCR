@@ -7,6 +7,7 @@
 # Contract: chỉ đổi chính xác nhãn KEY + VALUE và relation có mode inline.
 
 import json
+import sys
 from pathlib import Path
 
 
@@ -61,6 +62,7 @@ def migrate_dataset(input_path, output_path):
 
 def main():
     """Migrate train, validation và test dataset sang role inline mới."""
+    sys.stdout.reconfigure(encoding="utf-8")
     for input_path, output_path in DATASET_PATHS:
         migrated_regions, removed_inline_relations = migrate_dataset(
             input_path,

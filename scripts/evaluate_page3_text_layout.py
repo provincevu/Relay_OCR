@@ -4,7 +4,7 @@
 # Cấu hình/parameter: dataset, checkpoint, device, threshold và output nhận từ command line.
 # Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.train_page3_text_layout.
 # Input/output: nhận annotations.json cùng thư mục checkpoint; ghi evaluation JSON.
-# Contract: bỏ qua region UNLABELED và inline legacy; liên kết nhiều region được tính theo từng cạnh KEY → VALUE.
+# Contract: đánh giá INLINE_KEY_VALUE; bỏ qua UNLABELED và inline legacy; liên kết nhiều region được tính theo từng cạnh KEY → VALUE.
 
 import argparse
 import json
@@ -83,7 +83,7 @@ def load_model(checkpoint_directory, device):
 
 
 def evaluate(arguments):
-    """Đánh giá nhận diện region và các liên kết KEY/VALUE."""
+    """Đánh giá các role, gồm INLINE_KEY_VALUE, và liên kết KEY/VALUE."""
     dataset = json.loads(arguments.dataset.read_text(encoding="utf-8"))
     records = [
         record

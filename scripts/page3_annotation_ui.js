@@ -12,7 +12,7 @@ const annotation = {
 };
 const explicitRoles = [
     "HEADER", "FIELD_TABLE", "NOTE", "PAGE_NUMBER", "FORM_NUMBER",
-    "OTHER", "UNLABELED",
+    "INLINE_KEY_VALUE", "OTHER", "UNLABELED",
 ];
 const suggestionRoles = new Set(["FIELD_TABLE", "PAGE_NUMBER", "FORM_NUMBER"]);
 const annotationStyle = document.createElement("style");
@@ -31,6 +31,7 @@ annotationStyle.textContent = `
     .ocr-box.annotation-note{border-color:#ca8a04;background:#ca8a0424}
     .ocr-box.annotation-page_number{border-color:#db2777;background:#db277724}
     .ocr-box.annotation-form_number{border-color:#ea580c;background:#ea580c24}
+    .ocr-box.annotation-inline_key_value{border-color:#16a34a;background:#16a34a24}
     .ocr-box.annotation-keyword-suggestion{outline:3px dashed #f97316;outline-offset:2px}
     .ocr-box.annotation-frozen-key,.ocr-box.annotation-frozen-value{
         border-color:#64748b;background:#64748b2b;border-style:dotted;opacity:.8}
@@ -65,13 +66,14 @@ annotationToolbar.innerHTML = `
         <option value="NOTE">Đánh dấu NOTE</option>
         <option value="PAGE_NUMBER">Đánh dấu PAGE_NUMBER</option>
         <option value="FORM_NUMBER">Đánh dấu FORM_NUMBER</option>
+        <option value="INLINE_KEY_VALUE">Đánh dấu INLINE_KEY_VALUE</option>
         <option value="UNLABELED">Đánh dấu UNLABELED</option>
         <option value="OTHER">Đánh dấu OTHER</option>
     </select></label>
     <input id="fieldTableKeywords" type="text" hidden
         placeholder="Keyword FIELD_TABLE, cách nhau bằng dấu phẩy">
     <button id="commitGroup" class="secondary">Chốt nhóm 1</button>
-    <button id="inlineGroup" class="secondary">Key-value trong cùng bbox</button>
+    <button id="inlineGroup" class="secondary">Gán INLINE_KEY_VALUE</button>
     <button id="breakRule" class="secondary">Ngắt rule / Bảng mới</button>
     <button id="applyAnnotation" class="secondary">Gán nhãn</button>
     <button id="clearAnnotation" class="secondary">Gỡ nhãn đã gán</button>
@@ -89,6 +91,7 @@ document.querySelector(".legend").insertAdjacentHTML("beforeend", `
     <span class="legend-item"><span class="swatch" style="background:#ca8a0424;border-color:#ca8a04"></span>NOTE</span>
     <span class="legend-item"><span class="swatch" style="background:#db277724;border-color:#db2777"></span>PAGE_NUMBER</span>
     <span class="legend-item"><span class="swatch" style="background:#ea580c24;border-color:#ea580c"></span>FORM_NUMBER</span>
+    <span class="legend-item"><span class="swatch" style="background:#16a34a24;border-color:#16a34a"></span>INLINE_KEY_VALUE</span>
     <span class="legend-item"><span class="swatch frozen"></span>Đã khóa từ rule trước</span>
     <span class="legend-item"><span class="swatch locked-row"></span>Hàng Y đã khóa</span>
 `);
@@ -128,6 +131,7 @@ function updateRoleSuggestions() {
     const occupiedIds = new Set(allPairs().flatMap(allPairIds));
     const protectedRoles = new Set([
         "FIELD_TABLE", "HEADER", "NOTE", "PAGE_NUMBER", "FORM_NUMBER",
+        "INLINE_KEY_VALUE",
     ]);
     const eligibleRegions = regions.filter(region => {
         const labels = annotation.labels[region.id] || [];
@@ -324,7 +328,7 @@ refreshBoxStyles = function () {
         const roles = labels[id] || [];
         for (const role of [
             "KEY", "VALUE", "HEADER", "FIELD_TABLE", "NOTE", "PAGE_NUMBER",
-            "FORM_NUMBER", "UNLABELED", "OTHER",
+            "FORM_NUMBER", "INLINE_KEY_VALUE", "UNLABELED", "OTHER",
         ]) {
             box.classList.toggle(`annotation-${role.toLowerCase()}`, roles.includes(role));
         }
@@ -543,10 +547,15 @@ breakRuleButton.addEventListener("click", () => {
 });
 inlineGroupButton.addEventListener("click", () => {
     if (inlineGroupButton.disabled) return;
-    const id = [...annotation.selected][0];
-    state.currentKeyId = id;
-    openInlineEditor(id);
+    applyInlineRole();
 });
+
+inlineCurrentKeyButton.textContent = "Gán INLINE_KEY_VALUE";
+inlineCurrentKeyButton.addEventListener("click", event => {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!inlineCurrentKeyButton.disabled) applyInlineRole();
+}, true);
 
 editPrediction = function (pair) {
     if (isLockedFrozenSample(pair)) {
@@ -651,6 +660,17 @@ function applySelectedLabel() {
     cancelGroupSelection(); recomputePreview();
     instruction.textContent = `Đã gán ${annotation.mode} cho ${ids.size} region. Có thể hoàn tác annotation.`;
 }
+
+function applyInlineRole() {
+    const previousMode = annotation.mode;
+    annotation.mode = "INLINE_KEY_VALUE";
+    applySelectedLabel();
+    annotation.mode = previousMode;
+    modeSelect.value = previousMode;
+    updateRoleSuggestions();
+    updateButtons();
+}
+
 applyButton.addEventListener("click", applySelectedLabel);
 clearAnnotationButton.addEventListener("click", () => {
     rememberAnnotation();
@@ -678,6 +698,8 @@ modeSelect.addEventListener("change", () => {
                 ? "Bbox đầu tiên từ trên xuống có dấu / và không có dấu - sẽ được viền gợi ý; bấm Q hoặc Gán nhãn để xác nhận."
             : annotation.mode === "FORM_NUMBER"
                 ? "Bbox đầu tiên từ trên xuống có cả dấu / và dấu - sẽ được viền gợi ý; bấm Q hoặc Gán nhãn để xác nhận."
+            : annotation.mode === "INLINE_KEY_VALUE"
+                ? "Chọn một bbox inline rồi bấm Gán INLINE_KEY_VALUE hoặc phím Q. Role này không tạo relation KEY → VALUE."
             : `Click hoặc kéo khung để chọn region; Shift + kéo để thêm vùng. Bấm Gán ${annotation.mode} để áp dụng.`;
 });
 fieldTableKeywords.addEventListener("input", () => {
