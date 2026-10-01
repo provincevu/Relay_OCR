@@ -1,7 +1,8 @@
 # Mục đích: LayoutLMv3 chỉ dùng text + bbox cho page 3+.
 # Chức năng: mã hóa OCR, dự đoán một role cho mỗi region và row-link giữa các region.
 # Luồng xử lý: chia token thành chunk → encoder → gộp region → role head.
-# Cấu hình/parameter: variant A/B, checkpoint encoder, danh sách role.
+# Cấu hình/parameter: variant A/B, checkpoint encoder, danh sách role,
+# gradient checkpointing.
 # Quan hệ: dùng chung bởi lệnh train và compare trong compare_page3_layout.
 # Input/output: một page OCR → logits [region, role] và liên kết KEY → VALUE;
 # value được nối theo quy tắc cùng hàng.
@@ -24,10 +25,18 @@ from .page_n_prediction_filter import filter_prediction_links
 class Page3LayoutModel(nn.Module):
     """Học vai trò region; liên kết KEY -> VALUE dùng row-link."""
 
-    def __init__(self, encoder, role_count, head_dropout=0.3):
+    def __init__(
+        self,
+        encoder,
+        role_count,
+        head_dropout=0.3,
+        gradient_checkpointing=False,
+    ):
         """Tạo head role với dropout; không học learned-link."""
         super().__init__()
         self.encoder = encoder
+        if gradient_checkpointing:
+            self.encoder.gradient_checkpointing_enable()
         hidden_size = encoder.config.hidden_size
         self.head_dropout = nn.Dropout(head_dropout)
         self.role_head = nn.Linear(hidden_size, role_count)
@@ -62,7 +71,14 @@ class Page3LayoutModel(nn.Module):
         return role_logits
 
 
-def load_pretrained(encoder_path, variant, role_count, seed, head_dropout=0.3):
+def load_pretrained(
+    encoder_path,
+    variant,
+    role_count,
+    seed,
+    head_dropout=0.3,
+    gradient_checkpointing=False,
+):
     """Khởi tạo encoder pretrained và head mới cần được huấn luyện."""
     config = LayoutLMv3Config.from_pretrained(encoder_path)
     config.visual_embed = variant == "A"
@@ -71,7 +87,12 @@ def load_pretrained(encoder_path, variant, role_count, seed, head_dropout=0.3):
         config=config,
     )
     torch.manual_seed(seed)
-    return Page3LayoutModel(encoder, role_count, head_dropout)
+    return Page3LayoutModel(
+        encoder,
+        role_count,
+        head_dropout,
+        gradient_checkpointing,
+    )
 
 
 def load_preprocessors(encoder_path):

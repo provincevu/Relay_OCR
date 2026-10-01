@@ -1,7 +1,8 @@
 # Mục đích: fine-tune LayoutLMv3 chỉ dùng text + bbox từ annotation page 3.
 # Chức năng: học một role cho mỗi region; liên kết KEY → VALUE dùng row-link.
 # Luồng xử lý: phiếu đã xác nhận → mã hóa region → role loss → checkpoint tốt nhất.
-# Cấu hình/parameter: python -m scripts.train_page3_text_layout --help.
+# Cấu hình/parameter: python -m scripts.train_page3_text_layout --help;
+# hỗ trợ AMP, freeze encoder và gradient checkpointing.
 # Quan hệ: dùng annotations.json của serve_page3_annotations và model B hiện có.
 # Input/output: train nhận dataset đã chia bên ngoài; predict nhận manifest OCR.
 # Contract: INLINE_KEY_VALUE là role single class; UNLABELED và inline KEY VALUE legacy không là target.
@@ -9,9 +10,9 @@
 # Contract: không chia train/test/val; visual_embed=False, không phải bản distilled.
 
 import argparse
-import copy
 import json
 import random
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -226,12 +227,16 @@ def _save_checkpoint(output, tokenizer, model, epoch, metrics, head_dropout):
         )
     output.mkdir(parents=True, exist_ok=True)
     tokenizer.save_pretrained(output)
+    model_state = {
+        name: parameter.detach().cpu()
+        for name, parameter in model.state_dict().items()
+    }
     torch.save(
         {
             "roles": ROLES,
             "role_mode": "single_class",
             "encoder_config": model.encoder.config.to_dict(),
-            "model_state": model.state_dict(),
+            "model_state": model_state,
             "head_dropout": head_dropout,
             "link_mode": "row",
             "best_epoch": epoch,
@@ -264,17 +269,23 @@ def train(arguments):
     random.seed(arguments.seed)
     torch.manual_seed(arguments.seed)
     tokenizer = LayoutLMv3TokenizerFast.from_pretrained(arguments.encoder)
+    use_amp = arguments.amp and str(arguments.device).startswith("cuda")
     model = load_pretrained(
         arguments.encoder,
         "B",
         len(ROLES),
         arguments.seed,
         arguments.head_dropout,
+        arguments.gradient_checkpointing and not arguments.freeze_encoder,
     ).to(arguments.device)
+    if arguments.freeze_encoder:
+        for parameter in model.encoder.parameters():
+            parameter.requires_grad = False
     optimizer = torch.optim.AdamW(
         _optimizer_parameters(model, arguments.weight_decay),
         lr=arguments.learning_rate,
     )
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
     total_steps = arguments.epochs * len(pages)
     warmup_steps = int(total_steps * arguments.warmup_ratio)
     scheduler = get_linear_schedule_with_warmup(
@@ -289,19 +300,35 @@ def train(arguments):
     epochs_without_improvement = 0
     for epoch in range(arguments.epochs):
         model.train()
+        if arguments.freeze_encoder:
+            model.encoder.eval()
         random.shuffle(pages)
         total_loss = 0.0
         for page in pages:
             encoded = encode_page(page, tokenizer, None, "B", arguments.device)
             optimizer.zero_grad()
-            role_logits = model(encoded, len(page["regions"]))
-            loss = masked_training_loss(role_logits, page)
-            loss.backward()
+            amp_context = (
+                torch.autocast(device_type="cuda", dtype=torch.float16)
+                if use_amp
+                else nullcontext()
+            )
+            with amp_context:
+                role_logits = model(encoded, len(page["regions"]))
+                loss = masked_training_loss(role_logits, page)
+            if use_amp:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+            else:
+                loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 arguments.max_grad_norm,
             )
-            optimizer.step()
+            if use_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             scheduler.step()
             total_loss += loss.detach().item()
         metrics = validation_metrics(
@@ -323,7 +350,10 @@ def train(arguments):
         )
         if metrics["val_f1"] > best_val_f1 + arguments.early_stopping_min_delta:
             best_val_f1 = metrics["val_f1"]
-            best_state = copy.deepcopy(model.state_dict())
+            best_state = {
+                name: parameter.detach().cpu().clone()
+                for name, parameter in model.state_dict().items()
+            }
             best_epoch = epoch + 1
             best_metrics = metrics
             epochs_without_improvement = 0
@@ -462,6 +492,21 @@ def main():
         default=1e-4,
     )
     train_parser.add_argument("--threshold", type=float, default=0.5)
+    train_parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Dùng mixed precision float16 khi train trên CUDA.",
+    )
+    train_parser.add_argument(
+        "--freeze-encoder",
+        action="store_true",
+        help="Đóng băng LayoutLMv3 và chỉ train role head.",
+    )
+    train_parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="Bật gradient checkpointing cho LayoutLMv3 encoder.",
+    )
     predict_parser = commands.add_parser("predict", help="Dự đoán từ annotation_manifest.json")
     predict_parser.add_argument("--manifest", type=Path, required=True)
     predict_parser.add_argument("--checkpoint", type=Path, required=True)
