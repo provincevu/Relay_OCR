@@ -1,10 +1,12 @@
 # Mục đích: fine-tune LayoutLMv3 chỉ dùng text + bbox từ annotation page 3.
 # Chức năng: học một role cho mỗi region; liên kết KEY → VALUE dùng row-link.
-# Luồng xử lý: phiếu đã xác nhận → mã hóa region → role loss → checkpoint tốt nhất.
+# Luồng xử lý: phiếu đã xác nhận → mã hóa region → role loss → checkpoint tốt nhất;
+# hoặc embedding cache → role head → checkpoint.
 # Cấu hình/parameter: python -m scripts.train_page3_text_layout --help;
 # hỗ trợ AMP, freeze encoder và gradient checkpointing.
 # Quan hệ: dùng annotations.json của serve_page3_annotations và model B hiện có.
-# Input/output: train nhận dataset đã chia bên ngoài; predict nhận manifest OCR.
+# Input/output: train nhận dataset đã chia bên ngoài; train-cached nhận embedding cache;
+# predict nhận manifest OCR.
 # Contract: INLINE_KEY_VALUE là role single class; UNLABELED và inline KEY VALUE legacy không là target.
 # Contract: không có learned-link head/loss; relation production là row-link.
 # Contract: không chia train/test/val; visual_embed=False, không phải bản distilled.
@@ -28,7 +30,9 @@ from scripts.page3_layout_model import (
     encode_page,
     load_pretrained,
     predict_page,
+    row_links,
 )
+from scripts.page_n_prediction_filter import filter_prediction_links
 
 
 ROLES = [
@@ -184,6 +188,126 @@ def validation_metrics(pages, model, tokenizer, device, threshold):
         "role_f1": role_f1,
         "row_link_f1": row_link_f1,
         "val_f1": val_f1,
+    }
+
+
+def _load_embedding_pages(cache_path):
+    """Đọc index và các page embedding đã tạo từ cache."""
+    index_path = cache_path / "index.json"
+    index = json.loads(index_path.read_text(encoding="utf-8"))
+    if index.get("roles") != ROLES:
+        raise ValueError("Cache embedding không khớp danh sách role hiện tại.")
+    pages = [
+        torch.load(
+            cache_path / item["file"],
+            map_location="cpu",
+            weights_only=True,
+        )
+        for item in index["pages"]
+    ]
+    if not pages:
+        raise ValueError("Cache embedding không có page.")
+    return index, pages
+
+
+def _cached_role_logits(role_head, dropout, page, device):
+    """Tính role logits từ embedding cache của một page."""
+    embeddings = page["region_embeddings"].to(device)
+    return role_head(dropout(embeddings)), embeddings
+
+
+def _cached_validation_metrics(pages, role_head, dropout, device):
+    """Đánh giá role F1 và row-link F1 chỉ từ embedding cache."""
+    role_counts = {role: [0, 0, 0] for role in ["KEY", "VALUE"]}
+    row_link_counts = [0, 0, 0]
+    role_head.eval()
+    dropout.eval()
+    with torch.inference_mode():
+        for page in pages:
+            role_logits, embeddings = _cached_role_logits(
+                role_head,
+                dropout,
+                page,
+                device,
+            )
+            role_scores = role_logits.softmax(dim=-1).cpu().tolist()
+            predicted_regions = []
+            for region, scores in zip(
+                page["regions"],
+                role_scores,
+                strict=True,
+            ):
+                best_role_index = max(
+                    range(len(scores)),
+                    key=scores.__getitem__,
+                )
+                predicted_regions.append({
+                    "id": region["id"],
+                    "text": region["text"],
+                    "bbox": region["bbox"],
+                    "labels": [ROLES[best_role_index]],
+                })
+            predicted_links_result = filter_prediction_links({
+                "regions": predicted_regions,
+                "links": row_links(
+                    predicted_regions,
+                    "KEY",
+                    "VALUE",
+                    "key_region_id",
+                    "value_region_id",
+                ),
+            })
+            labels = page["annotations"]
+            known_ids = {
+                region["id"]
+                for region in page["regions"]
+                if _is_trainable_annotation(labels[region["id"]])
+            }
+            predicted_labels = {
+                region["id"]: set(region["labels"])
+                for region in predicted_regions
+            }
+            for role in role_counts:
+                gold = {
+                    region_id
+                    for region_id in known_ids
+                    if role in labels[region_id]
+                }
+                predicted = {
+                    region_id
+                    for region_id in known_ids
+                    if role in predicted_labels[region_id]
+                }
+                _update_counts(role_counts[role], gold, predicted)
+
+            gold_links = {
+                (key_id, value_id)
+                for relation in page["relations"]
+                for key_id in relation["key_region_ids"]
+                for value_id in relation["value_region_ids"]
+                if key_id in known_ids and value_id in known_ids
+            }
+            predicted_links = {
+                (link["key_region_id"], link["value_region_id"])
+                for link in predicted_links_result["links"]
+                if link["key_region_id"] in known_ids
+                and link["value_region_id"] in known_ids
+            }
+            _update_counts(row_link_counts, gold_links, predicted_links)
+            del embeddings
+
+    key_f1 = _f1_from_counts(role_counts["KEY"])
+    value_f1 = _f1_from_counts(role_counts["VALUE"])
+    row_link_f1 = _f1_from_counts(row_link_counts)
+    role_f1 = (key_f1 + value_f1) / 2
+    role_head.train()
+    dropout.train()
+    return {
+        "key_f1": key_f1,
+        "value_f1": value_f1,
+        "role_f1": role_f1,
+        "row_link_f1": row_link_f1,
+        "val_f1": 0.5 * role_f1 + 0.5 * row_link_f1,
     }
 
 
@@ -384,6 +508,141 @@ def train(arguments):
     )
 
 
+def train_cached(arguments):
+    """Train role head trên embedding cache mà không chạy lại encoder."""
+    train_index, train_pages = _load_embedding_pages(arguments.dataset)
+    validation_index, validation_pages = _load_embedding_pages(
+        arguments.validation_dataset,
+    )
+    if train_index["embedding_dimension"] != validation_index["embedding_dimension"]:
+        raise ValueError("Train và validation cache khác embedding dimension.")
+    encoder_config = LayoutLMv3Config.from_pretrained(arguments.encoder)
+    if encoder_config.hidden_size != train_index["embedding_dimension"]:
+        raise ValueError("Embedding cache không khớp hidden size của encoder.")
+    if arguments.epochs <= 0:
+        raise ValueError("epochs phải lớn hơn 0.")
+    if not 0 <= arguments.warmup_ratio <= 1:
+        raise ValueError("warmup_ratio phải nằm trong khoảng 0 đến 1.")
+    if arguments.weight_decay < 0:
+        raise ValueError("weight_decay không được âm.")
+    if arguments.max_grad_norm <= 0:
+        raise ValueError("max_grad_norm phải lớn hơn 0.")
+    if arguments.head_dropout < 0 or arguments.head_dropout >= 1:
+        raise ValueError("head_dropout phải nằm trong khoảng [0, 1).")
+    if arguments.early_stopping_patience < 1:
+        raise ValueError("early_stopping_patience phải ít nhất là 1.")
+    if arguments.early_stopping_min_delta < 0:
+        raise ValueError("early_stopping_min_delta không được âm.")
+
+    torch.manual_seed(arguments.seed)
+    embedding_dimension = train_index["embedding_dimension"]
+    role_head = torch.nn.Linear(
+        embedding_dimension,
+        len(ROLES),
+    ).to(arguments.device)
+    dropout = torch.nn.Dropout(arguments.head_dropout).to(arguments.device)
+    optimizer = torch.optim.AdamW(
+        list(role_head.parameters()),
+        lr=arguments.learning_rate,
+        weight_decay=arguments.weight_decay,
+    )
+    total_steps = arguments.epochs * len(train_pages)
+    warmup_steps = int(total_steps * arguments.warmup_ratio)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
+    best_val_f1 = float("-inf")
+    best_head_state = None
+    best_epoch = 0
+    best_metrics = None
+    epochs_without_improvement = 0
+
+    for epoch in range(arguments.epochs):
+        role_head.train()
+        dropout.train()
+        total_loss = 0.0
+        for page in train_pages:
+            optimizer.zero_grad()
+            role_logits, embeddings = _cached_role_logits(
+                role_head,
+                dropout,
+                page,
+                arguments.device,
+            )
+            loss = masked_training_loss(role_logits, page)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(
+                role_head.parameters(),
+                arguments.max_grad_norm,
+            )
+            optimizer.step()
+            scheduler.step()
+            total_loss += loss.detach().item()
+            del role_logits, embeddings, loss
+
+        metrics = _cached_validation_metrics(
+            validation_pages,
+            role_head,
+            dropout,
+            arguments.device,
+        )
+        average_loss = total_loss / len(train_pages)
+        print(
+            f"Epoch {epoch + 1}/{arguments.epochs}: "
+            f"loss={average_loss:.6f}, "
+            f"val_f1={metrics['val_f1']:.4f}, "
+            f"KEY={metrics['key_f1']:.4f}, "
+            f"VALUE={metrics['value_f1']:.4f}, "
+            f"row-link={metrics['row_link_f1']:.4f}",
+            flush=True,
+        )
+        if metrics["val_f1"] > best_val_f1 + arguments.early_stopping_min_delta:
+            best_val_f1 = metrics["val_f1"]
+            best_head_state = {
+                name: parameter.detach().cpu().clone()
+                for name, parameter in role_head.state_dict().items()
+            }
+            best_epoch = epoch + 1
+            best_metrics = metrics
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= arguments.early_stopping_patience:
+                print(
+                    f"Early stopping tại epoch {epoch + 1}; "
+                    f"best epoch={best_epoch}, val_f1={best_val_f1:.4f}",
+                    flush=True,
+                )
+                break
+
+    if best_head_state is None or best_metrics is None:
+        raise RuntimeError("Không tạo được checkpoint tốt nhất từ embedding cache.")
+
+    tokenizer = LayoutLMv3TokenizerFast.from_pretrained(arguments.encoder)
+    base_model = load_pretrained(
+        arguments.encoder,
+        "B",
+        len(ROLES),
+        arguments.seed,
+        arguments.head_dropout,
+    )
+    base_model.role_head.load_state_dict(best_head_state)
+    _save_checkpoint(
+        arguments.output,
+        tokenizer,
+        base_model,
+        best_epoch,
+        best_metrics,
+        arguments.head_dropout,
+    )
+    print(
+        f"Đã lưu best checkpoint từ embedding cache: {arguments.output} "
+        f"(epoch {best_epoch}, val_f1={best_val_f1:.4f})",
+    )
+
+
 def predict(arguments):
     """Dự đoán nhãn và các cạnh region theo ID, không dùng annotation làm đầu vào."""
     checkpoint = torch.load(
@@ -507,6 +766,27 @@ def main():
         action="store_true",
         help="Bật gradient checkpointing cho LayoutLMv3 encoder.",
     )
+    cached_train_parser = commands.add_parser(
+        "train-cached",
+        help="Train role head từ embedding cache đã tạo.",
+    )
+    cached_train_parser.add_argument("--dataset", type=Path, required=True)
+    cached_train_parser.add_argument("--validation-dataset", type=Path, required=True)
+    cached_train_parser.add_argument("--output", type=Path, required=True)
+    cached_train_parser.add_argument("--encoder", default="microsoft/layoutlmv3-base")
+    cached_train_parser.add_argument("--epochs", type=int, default=50)
+    cached_train_parser.add_argument("--learning-rate", type=float, default=2e-5)
+    cached_train_parser.add_argument("--seed", type=int, default=42)
+    cached_train_parser.add_argument("--weight-decay", type=float, default=0.03)
+    cached_train_parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    cached_train_parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    cached_train_parser.add_argument("--head-dropout", type=float, default=0.3)
+    cached_train_parser.add_argument("--early-stopping-patience", type=int, default=5)
+    cached_train_parser.add_argument(
+        "--early-stopping-min-delta",
+        type=float,
+        default=1e-4,
+    )
     predict_parser = commands.add_parser("predict", help="Dự đoán từ annotation_manifest.json")
     predict_parser.add_argument("--manifest", type=Path, required=True)
     predict_parser.add_argument("--checkpoint", type=Path, required=True)
@@ -518,11 +798,13 @@ def main():
         default="row",
         help="Cách tạo liên kết KEY → VALUE; pipeline chỉ dùng row-link.",
     )
-    for command in [train_parser, predict_parser]:
+    for command in [train_parser, cached_train_parser, predict_parser]:
         command.add_argument("--device", default="cpu")
     arguments = parser.parse_args()
     if arguments.command == "train":
         train(arguments)
+    elif arguments.command == "train-cached":
+        train_cached(arguments)
     else:
         predict(arguments)
 
