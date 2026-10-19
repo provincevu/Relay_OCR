@@ -12,6 +12,7 @@
 import torch
 from PIL import Image
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 from transformers import (
     LayoutLMv3Config,
     LayoutLMv3ImageProcessor,
@@ -35,8 +36,7 @@ class Page3LayoutModel(nn.Module):
         """Tạo head role với dropout; không học learned-link."""
         super().__init__()
         self.encoder = encoder
-        if gradient_checkpointing:
-            self.encoder.gradient_checkpointing_enable()
+        self.gradient_checkpointing = gradient_checkpointing
         hidden_size = encoder.config.hidden_size
         self.head_dropout = nn.Dropout(head_dropout)
         self.role_head = nn.Linear(hidden_size, role_count)
@@ -47,12 +47,30 @@ class Page3LayoutModel(nn.Module):
             self.encoder,
             encoded,
             region_count,
+            self._encode_chunk,
         )
         role_logits = self.role_head(self.head_dropout(region_hidden))
         return role_logits
 
+    def _encode_chunk(self, inputs):
+        """Chạy một chunk bằng checkpoint thủ công khi đang huấn luyện."""
+        if not (self.gradient_checkpointing and self.training):
+            return self.encoder(**inputs).last_hidden_state
+        return checkpoint(
+            lambda *values: self.encoder(
+                **dict(zip(inputs.keys(), values, strict=True))
+            ).last_hidden_state,
+            *inputs.values(),
+            use_reentrant=False,
+        )
 
-def encode_region_embeddings(encoder, encoded, region_count):
+
+def encode_region_embeddings(
+    encoder,
+    encoded,
+    region_count,
+    encode_chunk=None,
+):
     """Chạy encoder và gộp hidden state theo từng region."""
     pooled = None
     counts = None
@@ -64,7 +82,11 @@ def encode_region_embeddings(encoder, encoded, region_count):
         }
         if "pixel_values" in encoded:
             inputs["pixel_values"] = encoded["pixel_values"]
-        hidden = encoder(**inputs).last_hidden_state
+        hidden = (
+            encode_chunk(inputs)
+            if encode_chunk is not None
+            else encoder(**inputs).last_hidden_state
+        )
         text_hidden = hidden[0, :chunk["input_ids"].shape[1]]
         indices = chunk["region_indices"]
         valid = indices >= 0
