@@ -1,21 +1,22 @@
 # Mục đích: tạo cache region embedding từ annotation page 3+ đã xác nhận.
 # Chức năng: chạy LayoutLMv3 encoder một lần cho mỗi page và lưu embedding trên CPU.
 # Luồng xử lý: annotations.json → encode page → gộp embedding theo region → cache .pt.
-# Cấu hình/parameter: dataset, output cache, encoder, device và giới hạn số page.
-# Quan hệ: dùng chung encode_page và encoder của page3_layout_model.
+# Cấu hình/parameter: dataset, output cache, encoder, device, AMP và giới hạn số page.
+# Quan hệ: dùng chung iter_page_chunks và encoder của page3_layout_model.
 # Input/output: nhận annotations.json; tạo index.json và một file .pt cho mỗi page.
 # Contract: không sửa annotation; cache giữ region ID, nhãn, relation và embedding.
 
 import argparse
 import json
+import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
 from transformers import LayoutLMv3TokenizerFast
 
 from scripts.page3_layout_model import (
-    encode_page,
-    encode_region_embeddings,
+    iter_page_chunks,
     load_pretrained,
 )
 from scripts.train_page3_text_layout import ROLES, _load_pages
@@ -32,11 +33,69 @@ def parse_arguments():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
+        "--amp",
+        action="store_true",
+        help="Dùng float16 khi chạy encoder trên CUDA.",
+    )
+    parser.add_argument(
+        "--pause-ms",
+        type=int,
+        default=100,
+        help="Thời gian nghỉ giữa các chunk khi chạy CUDA.",
+    )
+    parser.add_argument(
         "--max-pages",
         type=int,
         help="Chỉ xử lý tối đa số page này để kiểm tra cache.",
     )
     return parser.parse_args()
+
+
+def _stream_region_embeddings(
+    encoder,
+    page,
+    tokenizer,
+    device,
+    use_amp,
+    pause_ms,
+):
+    """Chạy từng chunk, chuyển hidden về CPU và giải phóng GPU ngay."""
+    pooled = None
+    counts = None
+    for chunk in iter_page_chunks(page, tokenizer, device):
+        inputs = {
+            name: value
+            for name, value in chunk.items()
+            if name != "region_indices"
+        }
+        amp_context = (
+            torch.autocast(device_type="cuda", dtype=torch.float16)
+            if use_amp
+            else nullcontext()
+        )
+        with amp_context:
+            hidden = encoder(**inputs).last_hidden_state
+        text_hidden = hidden[0, :chunk["input_ids"].shape[1]].float().cpu()
+        indices = chunk["region_indices"].detach().cpu()
+        valid = indices >= 0
+        if pooled is None:
+            pooled = text_hidden.new_zeros(
+                (len(page["regions"]), text_hidden.shape[-1]),
+            )
+            counts = text_hidden.new_zeros((len(page["regions"]), 1))
+        pooled.index_add_(0, indices[valid], text_hidden[valid])
+        counts.index_add_(
+            0,
+            indices[valid],
+            text_hidden.new_ones((int(valid.sum()), 1)),
+        )
+        del chunk, inputs, hidden, text_hidden, indices, valid
+        if device.startswith("cuda"):
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            if pause_ms:
+                time.sleep(pause_ms / 1000)
+    return pooled / counts
 
 
 def _page_payload(page, embedding):
@@ -63,6 +122,8 @@ def prepare_embeddings(arguments):
         if arguments.max_pages <= 0:
             raise ValueError("--max-pages phải lớn hơn 0.")
         pages = pages[:arguments.max_pages]
+    if arguments.pause_ms < 0:
+        raise ValueError("--pause-ms không được âm.")
     if not pages:
         raise ValueError("Dataset không có page đã xác nhận để tạo embedding.")
 
@@ -74,6 +135,7 @@ def prepare_embeddings(arguments):
         arguments.seed,
     ).to(arguments.device)
     model.eval()
+    use_amp = arguments.amp and arguments.device.startswith("cuda")
     arguments.output.mkdir(parents=True, exist_ok=True)
     index_pages = []
 
@@ -84,17 +146,13 @@ def prepare_embeddings(arguments):
                 f"{page['image_name']}",
                 flush=True,
             )
-            encoded = encode_page(
+            embedding = _stream_region_embeddings(
+                model.encoder,
                 page,
                 tokenizer,
-                None,
-                "B",
                 arguments.device,
-            )
-            embedding = encode_region_embeddings(
-                model.encoder,
-                encoded,
-                len(page["regions"]),
+                use_amp,
+                arguments.pause_ms,
             )
             cache_name = f"page_{page_index:06d}.pt"
             torch.save(
@@ -108,7 +166,10 @@ def prepare_embeddings(arguments):
                 "image_name": page["image_name"],
                 "region_count": len(page["regions"]),
             })
-            del encoded, embedding
+            del embedding
+            if arguments.device.startswith("cuda"):
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
 
     index = {
         "schema_version": 1,
@@ -119,6 +180,8 @@ def prepare_embeddings(arguments):
         "role_mode": "single_class",
         "link_mode": "row",
         "embedding_dimension": model.encoder.config.hidden_size,
+        "chunk_streaming": True,
+        "amp": use_amp,
         "pages": index_pages,
     }
     (arguments.output / "index.json").write_text(

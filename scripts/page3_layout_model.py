@@ -114,8 +114,8 @@ def load_preprocessors(encoder_path):
     return tokenizer, image_processor
 
 
-def encode_page(page, tokenizer, image_processor, variant, device):
-    """Chuẩn hóa bbox về 0–1000 và giữ đầy đủ token của trang."""
+def iter_page_chunks(page, tokenizer, device):
+    """Tokenize page và tạo từng chunk trên thiết bị được chọn."""
     width, height = page["image_width"], page["image_height"]
     boxes = [
         [
@@ -136,7 +136,6 @@ def encode_page(page, tokenizer, image_processor, variant, device):
         return_overflowing_tokens=True,
         padding=False,
     )
-    chunks = []
     for chunk_index in range(len(tokens["input_ids"])):
         chunk = {
             name: torch.tensor([tokens[name][chunk_index]], device=device)
@@ -149,7 +148,12 @@ def encode_page(page, tokenizer, image_processor, variant, device):
             ],
             device=device,
         )
-        chunks.append(chunk)
+        yield chunk
+
+
+def encode_page(page, tokenizer, image_processor, variant, device):
+    """Chuẩn hóa bbox về 0–1000 và giữ đầy đủ token của trang."""
+    chunks = list(iter_page_chunks(page, tokenizer, device))
     encoded = {"chunks": chunks}
     if variant == "A":
         with Image.open(page["image_path"]) as image:
