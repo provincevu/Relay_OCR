@@ -43,32 +43,41 @@ class Page3LayoutModel(nn.Module):
 
     def forward(self, encoded, region_count):
         """Gộp mọi subtoken theo ID region rồi dự đoán role."""
-        pooled = None
-        counts = None
-        for chunk in encoded["chunks"]:
-            inputs = {
-                name: value
-                for name, value in chunk.items()
-                if name != "region_indices"
-            }
-            if "pixel_values" in encoded:
-                inputs["pixel_values"] = encoded["pixel_values"]
-            hidden = self.encoder(**inputs).last_hidden_state
-            text_hidden = hidden[0, :chunk["input_ids"].shape[1]]
-            indices = chunk["region_indices"]
-            valid = indices >= 0
-            if pooled is None:
-                pooled = text_hidden.new_zeros((region_count, hidden.shape[-1]))
-                counts = text_hidden.new_zeros((region_count, 1))
-            pooled = pooled.index_add(0, indices[valid], text_hidden[valid])
-            counts = counts.index_add(
-                0,
-                indices[valid],
-                text_hidden.new_ones((int(valid.sum()), 1)),
-            )
-        region_hidden = pooled / counts
+        region_hidden = encode_region_embeddings(
+            self.encoder,
+            encoded,
+            region_count,
+        )
         role_logits = self.role_head(self.head_dropout(region_hidden))
         return role_logits
+
+
+def encode_region_embeddings(encoder, encoded, region_count):
+    """Chạy encoder và gộp hidden state theo từng region."""
+    pooled = None
+    counts = None
+    for chunk in encoded["chunks"]:
+        inputs = {
+            name: value
+            for name, value in chunk.items()
+            if name != "region_indices"
+        }
+        if "pixel_values" in encoded:
+            inputs["pixel_values"] = encoded["pixel_values"]
+        hidden = encoder(**inputs).last_hidden_state
+        text_hidden = hidden[0, :chunk["input_ids"].shape[1]]
+        indices = chunk["region_indices"]
+        valid = indices >= 0
+        if pooled is None:
+            pooled = text_hidden.new_zeros((region_count, hidden.shape[-1]))
+            counts = text_hidden.new_zeros((region_count, 1))
+        pooled = pooled.index_add(0, indices[valid], text_hidden[valid])
+        counts = counts.index_add(
+            0,
+            indices[valid],
+            text_hidden.new_ones((int(valid.sum()), 1)),
+        )
+    return pooled / counts
 
 
 def load_pretrained(
