@@ -449,11 +449,15 @@ def train(arguments):
                 arguments.max_grad_norm,
             )
             if use_amp:
+                previous_scale = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
+                optimizer_updated = scaler.get_scale() >= previous_scale
             else:
                 optimizer.step()
-            scheduler.step()
+                optimizer_updated = True
+            if optimizer_updated:
+                scheduler.step()
             total_loss += loss.detach().item()
         metrics = validation_metrics(
             validation_pages,
