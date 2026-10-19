@@ -55,8 +55,13 @@ def build_html(dataset):
             --panel: #ffffff;
             --key: #2563eb;
             --value: #16a34a;
-            --other: #64748b;
+            --header: #ea580c;
+            --field-table: #0f766e;
+            --note: #a16207;
+            --page-number: #db2777;
+            --form-number: #0891b2;
             --inline: #7c3aed;
+            --other: #64748b;
         }
         * { box-sizing: border-box; }
         body {
@@ -122,10 +127,15 @@ def build_html(dataset):
         .region-box:hover, .region-box.selected { box-shadow: 0 0 0 3px #facc15; z-index: 10; }
         .region-box.key { border-color: var(--key); background: #2563eb2b; }
         .region-box.value { border-color: var(--value); background: #16a34a2b; }
+        .region-box.header { border-color: var(--header); background: #ea580c2b; }
+        .region-box.field-table { border-color: var(--field-table); background: #0f766e2b; }
+        .region-box.note { border-color: var(--note); background: #a162072b; }
+        .region-box.page-number { border-color: var(--page-number); background: #db27772b; }
+        .region-box.form-number { border-color: var(--form-number); background: #0891b22b; }
         .region-box.other { border-color: var(--other); background: #64748b1a; }
         .region-box.inline { border-color: var(--inline); background: #7c3aed2b; }
         .region-label {
-            background: currentColor;
+            background: var(--other);
             color: white;
             font-size: 11px;
             font-weight: 700;
@@ -136,10 +146,15 @@ def build_html(dataset):
             top: -18px;
             white-space: nowrap;
         }
-        .key .region-label { color: var(--key); }
-        .value .region-label { color: var(--value); }
-        .other .region-label { color: var(--other); }
-        .inline .region-label { color: var(--inline); }
+        .key .region-label { background: var(--key); }
+        .value .region-label { background: var(--value); }
+        .header .region-label { background: var(--header); }
+        .field-table .region-label { background: var(--field-table); }
+        .note .region-label { background: var(--note); }
+        .page-number .region-label { background: var(--page-number); }
+        .form-number .region-label { background: var(--form-number); }
+        .other .region-label { background: var(--other); }
+        .inline .region-label { background: var(--inline); }
         .panel { padding: 14px; }
         .panel h2 { font-size: 17px; margin: 0 0 10px; }
         .summary { color: var(--muted); font-size: 13px; line-height: 1.5; margin-bottom: 12px; }
@@ -147,7 +162,14 @@ def build_html(dataset):
         .legend span { border-radius: 5px; color: white; font-size: 12px; padding: 4px 6px; }
         .legend .key { background: var(--key); }
         .legend .value { background: var(--value); }
+        .legend .header { background: var(--header); }
+        .legend .field-table { background: var(--field-table); }
+        .legend .note { background: var(--note); }
+        .legend .page-number { background: var(--page-number); }
+        .legend .form-number { background: var(--form-number); }
+        .legend .inline { background: var(--inline); }
         .legend .other { background: var(--other); }
+        .role-summary { color: var(--muted); font-size: 12px; line-height: 1.5; margin-bottom: 12px; }
         .detail {
             background: #f8fafc;
             border: 1px solid var(--border);
@@ -206,8 +228,15 @@ def build_html(dataset):
             <div class="legend">
                 <span class="key">KEY</span>
                 <span class="value">VALUE</span>
+                <span class="header">HEADER</span>
+                <span class="field-table">FIELD_TABLE</span>
+                <span class="note">NOTE</span>
+                <span class="page-number">PAGE_NUMBER</span>
+                <span class="form-number">FORM_NUMBER</span>
+                <span class="inline">INLINE_KEY_VALUE</span>
                 <span class="other">OTHER</span>
             </div>
+            <div class="role-summary" id="roleSummary"></div>
             <div class="detail" id="regionDetail">Chọn một bbox để xem chi tiết.</div>
             <div class="link-section">
                 <h3>KEY → VALUE</h3>
@@ -223,6 +252,7 @@ const nextPageButton = document.getElementById("nextPageButton");
 const pagePosition = document.getElementById("pagePosition");
 const pageTitle = document.getElementById("pageTitle");
 const summary = document.getElementById("summary");
+const roleSummary = document.getElementById("roleSummary");
 const stage = document.getElementById("stage");
 const pageImage = document.getElementById("pageImage");
 const linkLayer = document.getElementById("linkLayer");
@@ -233,13 +263,16 @@ const regionMap = new Map();
 let currentPage = 0;
 
 function primaryLabel(region) {
+    if (region.labels.includes("INLINE_KEY_VALUE")) return "INLINE_KEY_VALUE";
     if (region.labels.includes("KEY") && region.labels.includes("VALUE")) {
-        return "INLINE";
+        return "INLINE_KEY_VALUE";
     }
-    for (const label of ["KEY", "VALUE", "OTHER"]) {
-        if (region.labels.includes(label)) return label;
-    }
-    return "OTHER";
+    return region.labels[0] || "OTHER";
+}
+
+function roleClass(role) {
+    if (role === "INLINE_KEY_VALUE") return "inline";
+    return role.toLowerCase().replaceAll("_", "-");
 }
 
 function center(region) {
@@ -275,18 +308,38 @@ function renderRegions(page) {
         regionMap.set(region.id, region);
         const label = primaryLabel(region);
         const box = document.createElement("div");
-        box.className = `region-box ${label.toLowerCase()}`;
+        box.className = `region-box ${roleClass(label)}`;
         box.dataset.regionId = region.id;
         box.style.left = percent(region.bbox[0], page.image_width);
         box.style.top = percent(region.bbox[1], page.image_height);
         box.style.width = percent(region.bbox[2] - region.bbox[0], page.image_width);
         box.style.height = percent(region.bbox[3] - region.bbox[1], page.image_height);
-        box.title = `${region.id} · ${region.text}`;
+        const bestScore = region.scores?.[label];
+        const scoreText = typeof bestScore === "number"
+            ? ` · ${(bestScore * 100).toFixed(1)}%`
+            : "";
+        box.title = `${region.id} · ${label}${scoreText} · ${region.text}`;
+        const regionLabel = document.createElement("span");
+        regionLabel.className = "region-label";
+        regionLabel.textContent = `${label}${scoreText}`;
+        box.appendChild(regionLabel);
         box.addEventListener("click", () => selectRegion(region));
         stage.appendChild(box);
     }
     showBoxes.checked = true;
     showBoxes.dispatchEvent(new Event("change"));
+}
+
+function renderRoleSummary(page) {
+    const counts = {};
+    for (const region of page.regions) {
+        const role = primaryLabel(region);
+        counts[role] = (counts[role] || 0) + 1;
+    }
+    roleSummary.textContent = Object.entries(counts)
+        .sort(([first], [second]) => first.localeCompare(second))
+        .map(([role, count]) => `${role}: ${count}`)
+        .join(" · ");
 }
 
 function clearLinks() {
@@ -371,6 +424,7 @@ function renderPage(index) {
         `${page.regions.length} region · ${page.links.length} KEY → VALUE`,
         `OCR: ${page.recognition_source}`,
     ].join("\n");
+    renderRoleSummary(page);
     pageImage.src = page.image_path || page.image_name;
     stage.style.aspectRatio = `${page.image_width} / ${page.image_height}`;
     renderRegions(page);

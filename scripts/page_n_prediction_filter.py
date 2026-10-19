@@ -4,7 +4,7 @@
 # Cấu hình/parameter: so sánh tâm bbox theo trục X; cùng region được xem là inline.
 # Quan hệ: dùng chung bởi Page3LayoutModel, viewer và script sửa predictions.json.
 # Input/output: nhận một prediction dict và cập nhật trực tiếp dict đó.
-# Contract: giữ nguyên region ID, text, bbox, score và metadata; chỉ đổi links và labels.
+# Contract: giữ nguyên region ID, text, bbox, score và role không liên quan đến link.
 
 
 def value_is_right(key_region, value_region):
@@ -64,7 +64,7 @@ def filter_prediction_links(prediction):
 
 
 def filter_unlinked_regions(prediction):
-    """Đổi KEY/VALUE không có link trong output đã chọn thành OTHER."""
+    """Đổi KEY/VALUE không có link thành OTHER và giữ nguyên role khác."""
     linked_key_ids = {
         link["key_region_id"]
         for link in prediction.get("links", [])
@@ -74,13 +74,14 @@ def filter_unlinked_regions(prediction):
         for link in prediction.get("links", [])
     }
     for region in prediction["regions"]:
+        original_labels = list(region.get("labels", []))
         labels = set(region.get("labels", []))
         if "KEY" in labels and region["id"] not in linked_key_ids:
             labels.discard("KEY")
         if "VALUE" in labels and region["id"] not in linked_value_ids:
             labels.discard("VALUE")
         region["labels"] = [
-            role for role in ["KEY", "VALUE"]
+            role for role in original_labels
             if role in labels
         ] or ["OTHER"]
     return prediction
