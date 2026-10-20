@@ -72,12 +72,6 @@ def filter_prediction_links(prediction):
     return prediction
 
 
-def _box_width(region):
-    """Trả chiều rộng bbox của region."""
-    box = region["bbox"]
-    return max(box[2] - box[0], 1)
-
-
 def _box_height(region):
     """Trả chiều cao bbox của region."""
     box = region["bbox"]
@@ -153,16 +147,12 @@ def _can_join_fragments(first, second, regions):
         second_box[2],
     )
     horizontal = (
-        y_overlap >= 0.5
+        y_overlap > 0
         and _fragment_gap(first, second, True)
         <= max(_box_height(first), _box_height(second)) * 1.5
     )
     vertical = (
-        (
-            x_overlap >= 0.35
-            or abs(first_box[0] - second_box[0])
-            <= max(_box_width(first), _box_width(second)) * 0.35
-        )
+        x_overlap > 0
         and _fragment_gap(first, second, False)
         <= max(_box_height(first), _box_height(second)) * 1.5
     )
@@ -183,7 +173,7 @@ def _fragment_distance(first, second):
         second_box[1],
         second_box[3],
     )
-    if y_overlap >= 0.5:
+    if y_overlap > 0:
         return _fragment_gap(first, second, True)
     return _fragment_gap(first, second, False)
 
