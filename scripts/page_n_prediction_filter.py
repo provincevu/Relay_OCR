@@ -72,35 +72,12 @@ def filter_prediction_links(prediction):
     return prediction
 
 
-def _box_height(region):
-    """Trả chiều cao bbox của region."""
-    box = region["bbox"]
-    return max(box[3] - box[1], 1)
-
-
 def _overlap_ratio(first_start, first_end, second_start, second_end):
     """Tính tỷ lệ phần giao trên đoạn ngắn hơn."""
     overlap = max(0, min(first_end, second_end) - max(first_start, second_start))
     first_size = max(first_end - first_start, 1)
     second_size = max(second_end - second_start, 1)
     return overlap / min(first_size, second_size)
-
-
-def _fragment_gap(first, second, horizontal):
-    """Tính khoảng cách giữa hai fragment theo một trục."""
-    first_box = first["bbox"]
-    second_box = second["bbox"]
-    if horizontal:
-        return max(
-            0,
-            max(first_box[0], second_box[0])
-            - min(first_box[2], second_box[2]),
-        )
-    return max(
-        0,
-        max(first_box[1], second_box[1])
-        - min(first_box[3], second_box[3]),
-    )
 
 
 def _has_layout_barrier(first, second, regions):
@@ -131,7 +108,7 @@ def _has_layout_barrier(first, second, regions):
 
 
 def _can_join_fragments(first, second, regions):
-    """Kiểm tra hai bbox cùng role có thể là hai mảnh liền nhau."""
+    """Kiểm tra hai bbox cùng role có giao nhau thực tế không."""
     first_box = first["bbox"]
     second_box = second["bbox"]
     y_overlap = _overlap_ratio(
@@ -146,36 +123,28 @@ def _can_join_fragments(first, second, regions):
         second_box[0],
         second_box[2],
     )
-    horizontal = (
-        y_overlap > 0
-        and _fragment_gap(first, second, True)
-        <= max(_box_height(first), _box_height(second)) * 1.5
-    )
-    vertical = (
+    return (
         x_overlap > 0
-        and _fragment_gap(first, second, False)
-        <= max(_box_height(first), _box_height(second)) * 1.5
-    )
-    return (horizontal or vertical) and not _has_layout_barrier(
-        first,
-        second,
-        regions,
+        and y_overlap > 0
+        and not _has_layout_barrier(
+            first,
+            second,
+            regions,
+        )
     )
 
 
 def _fragment_distance(first, second):
-    """Tính khoảng cách theo hướng nối của hai fragment."""
+    """Tính khoảng cách tâm để chọn fragment gần nhất."""
     first_box = first["bbox"]
     second_box = second["bbox"]
-    y_overlap = _overlap_ratio(
-        first_box[1],
-        first_box[3],
-        second_box[1],
-        second_box[3],
+    first_center_x = (first_box[0] + first_box[2]) / 2
+    first_center_y = (first_box[1] + first_box[3]) / 2
+    second_center_x = (second_box[0] + second_box[2]) / 2
+    second_center_y = (second_box[1] + second_box[3]) / 2
+    return abs(first_center_x - second_center_x) + abs(
+        first_center_y - second_center_y
     )
-    if y_overlap > 0:
-        return _fragment_gap(first, second, True)
-    return _fragment_gap(first, second, False)
 
 
 def _paired_targets(prediction):
@@ -194,6 +163,10 @@ def repair_split_links(prediction):
     regions = prediction["regions"]
     region_by_id = {region["id"]: region for region in regions}
     paired_targets = _paired_targets(prediction)
+    original_paired_targets = {
+        region_id: set(target_ids)
+        for region_id, target_ids in paired_targets.items()
+    }
     links = prediction.setdefault("links", [])
 
     while True:
@@ -207,7 +180,7 @@ def repair_split_links(prediction):
                 continue
 
             role = "KEY" if "KEY" in orphan_labels else "VALUE"
-            for anchor_id, target_ids in paired_targets.items():
+            for anchor_id, target_ids in original_paired_targets.items():
                 anchor = region_by_id[anchor_id]
                 anchor_labels = set(anchor.get("labels", []))
                 if role not in anchor_labels:
