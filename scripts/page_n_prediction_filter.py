@@ -108,15 +108,26 @@ def _can_join_fragments(first, second, regions):
     x_overlap = (
         min(first_box[2], second_box[2])
         - max(first_box[0], second_box[0])
-        + OVERLAP_TOLERANCE
     )
     y_overlap = (
         min(first_box[3], second_box[3])
         - max(first_box[1], second_box[1])
-        + OVERLAP_TOLERANCE
+    )
+    x_gap = max(
+        0,
+        max(first_box[0], second_box[0])
+        - min(first_box[2], second_box[2]),
+    )
+    y_gap = max(
+        0,
+        max(first_box[1], second_box[1])
+        - min(first_box[3], second_box[3]),
     )
     return (
-        (x_overlap > 0 or y_overlap > 0)
+        (
+            (x_overlap > 0 and y_gap <= OVERLAP_TOLERANCE)
+            or (y_overlap > 0 and x_gap <= OVERLAP_TOLERANCE)
+        )
         and not _has_layout_barrier(
             first,
             second,
