@@ -255,11 +255,14 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
     regions = []
     for region, scores in zip(page["regions"], role_scores, strict=True):
         best_role_index = max(range(len(scores)), key=scores.__getitem__)
+        role = roles[best_role_index]
+        if region["text"].strip().lower() == "item":
+            role = "FIELD_TABLE"
         regions.append({
             "id": region["id"],
             "text": region["text"],
             "bbox": region["bbox"],
-            "labels": [roles[best_role_index]],
+            "labels": [role],
             "scores": dict(zip(roles, scores, strict=True)),
         })
     row_key_value_links = row_links(
