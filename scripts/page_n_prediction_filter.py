@@ -6,6 +6,8 @@
 # Input/output: nhận một prediction dict và cập nhật trực tiếp dict đó.
 # Contract: giữ nguyên region ID, text, bbox, score và role không liên quan đến link.
 
+OVERLAP_TOLERANCE = 10
+
 
 def value_is_right(key_region, value_region):
     """Kiểm tra VALUE nằm bên phải KEY hoặc cùng bbox dạng inline."""
@@ -72,14 +74,6 @@ def filter_prediction_links(prediction):
     return prediction
 
 
-def _overlap_ratio(first_start, first_end, second_start, second_end):
-    """Tính tỷ lệ phần giao trên đoạn ngắn hơn."""
-    overlap = max(0, min(first_end, second_end) - max(first_start, second_start))
-    first_size = max(first_end - first_start, 1)
-    second_size = max(second_end - second_start, 1)
-    return overlap / min(first_size, second_size)
-
-
 def _has_layout_barrier(first, second, regions):
     """Kiểm tra header hoặc field table nằm giữa hai fragment."""
     first_box = first["bbox"]
@@ -108,24 +102,21 @@ def _has_layout_barrier(first, second, regions):
 
 
 def _can_join_fragments(first, second, regions):
-    """Kiểm tra hai bbox cùng role có giao nhau thực tế không."""
+    """Kiểm tra overlap theo một trục với sai số cho phép."""
     first_box = first["bbox"]
     second_box = second["bbox"]
-    y_overlap = _overlap_ratio(
-        first_box[1],
-        first_box[3],
-        second_box[1],
-        second_box[3],
+    x_overlap = (
+        min(first_box[2], second_box[2])
+        - max(first_box[0], second_box[0])
+        + OVERLAP_TOLERANCE
     )
-    x_overlap = _overlap_ratio(
-        first_box[0],
-        first_box[2],
-        second_box[0],
-        second_box[2],
+    y_overlap = (
+        min(first_box[3], second_box[3])
+        - max(first_box[1], second_box[1])
+        + OVERLAP_TOLERANCE
     )
     return (
-        x_overlap > 0
-        and y_overlap > 0
+        (x_overlap > 0 or y_overlap > 0)
         and not _has_layout_barrier(
             first,
             second,
