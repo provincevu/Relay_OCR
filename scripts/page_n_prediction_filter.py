@@ -165,6 +165,40 @@ def _inherited_field_table_scope(
     return False
 
 
+def _candidate_is_in_field_table_scope(
+    region,
+    field_tables,
+    inherited_field_table_x_ranges,
+    image_width,
+    field_table_x_tolerance,
+):
+    """Xác định candidate theo FIELD_TABLE hiện tại hoặc page trước."""
+    if field_tables:
+        first_field_table_top = min(
+            field_table["bbox"][1]
+            for field_table in field_tables
+        )
+        if region["bbox"][1] < first_field_table_top:
+            return bool(inherited_field_table_x_ranges) and (
+                _inherited_field_table_scope(
+                    region,
+                    inherited_field_table_x_ranges,
+                    image_width,
+                    field_table_x_tolerance,
+                )
+            )
+        return _below_field_table(region, field_tables)
+
+    return bool(inherited_field_table_x_ranges) and (
+        _inherited_field_table_scope(
+            region,
+            inherited_field_table_x_ranges,
+            image_width,
+            field_table_x_tolerance,
+        )
+    )
+
+
 def filter_distant_same_row_candidates(
     regions,
     inherited_field_table_x_ranges=None,
@@ -210,22 +244,20 @@ def filter_distant_same_row_candidates(
                     continue
                 if _horizontal_gap(first, second) <= SAME_ROW_GAP:
                     continue
-                if field_tables:
-                    first_is_true = _below_field_table(first, field_tables)
-                    second_is_true = _below_field_table(second, field_tables)
-                else:
-                    first_is_true = _inherited_field_table_scope(
-                        first,
-                        inherited_field_table_x_ranges,
-                        image_width,
-                        field_table_x_tolerance,
-                    )
-                    second_is_true = _inherited_field_table_scope(
-                        second,
-                        inherited_field_table_x_ranges,
-                        image_width,
-                        field_table_x_tolerance,
-                    )
+                first_is_true = _candidate_is_in_field_table_scope(
+                    first,
+                    field_tables,
+                    inherited_field_table_x_ranges,
+                    image_width,
+                    field_table_x_tolerance,
+                )
+                second_is_true = _candidate_is_in_field_table_scope(
+                    second,
+                    field_tables,
+                    inherited_field_table_x_ranges,
+                    image_width,
+                    field_table_x_tolerance,
+                )
                 if first_is_true and not second_is_true:
                     false_positive_ids.add(second["id"])
                 elif second_is_true and not first_is_true:
