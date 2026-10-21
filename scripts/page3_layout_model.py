@@ -259,7 +259,7 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
     for region, scores in zip(page["regions"], role_scores, strict=True):
         best_role_index = max(range(len(scores)), key=scores.__getitem__)
         role = roles[best_role_index]
-        if region["text"].strip().lower() == "item":
+        if region["text"].strip().lower() in {"item", "value"}:
             role = "FIELD_TABLE"
         regions.append({
             "id": region["id"],
