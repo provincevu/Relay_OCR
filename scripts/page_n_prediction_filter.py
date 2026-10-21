@@ -122,7 +122,7 @@ def _below_field_table(region, field_tables):
 
 
 def filter_distant_same_row_candidates(regions):
-    """Loại candidate cùng role ở xa candidate thật bên dưới FIELD_TABLE."""
+    """Loại KEY/VALUE cùng hàng FIELD_TABLE hoặc ở xa candidate thật."""
     field_tables = [
         region
         for region in regions
@@ -130,6 +130,16 @@ def filter_distant_same_row_candidates(regions):
     ]
     if not field_tables:
         return regions
+
+    same_row_field_table_ids = {
+        region["id"]
+        for region in regions
+        if set(region.get("labels", [])).intersection({"KEY", "VALUE"})
+        and any(_same_row(region, field_table) for field_table in field_tables)
+    }
+    for region in regions:
+        if region["id"] in same_row_field_table_ids:
+            region["labels"] = ["OTHER"]
 
     candidates_by_role = {
         role: [
