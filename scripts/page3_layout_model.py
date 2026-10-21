@@ -20,7 +20,10 @@ from transformers import (
     LayoutLMv3TokenizerFast,
 )
 
-from .page_n_prediction_filter import filter_prediction_links
+from .page_n_prediction_filter import (
+    filter_distant_same_row_candidates,
+    filter_prediction_links,
+)
 
 
 class Page3LayoutModel(nn.Module):
@@ -265,6 +268,7 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
             "labels": [role],
             "scores": dict(zip(roles, scores, strict=True)),
         })
+    filter_distant_same_row_candidates(regions)
     row_key_value_links = row_links(
         regions,
         "KEY",

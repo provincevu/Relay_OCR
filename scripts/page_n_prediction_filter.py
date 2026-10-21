@@ -7,6 +7,7 @@
 # Contract: giữ nguyên region ID, text, bbox, score và role không liên quan đến link.
 
 OVERLAP_TOLERANCE = 10
+SAME_ROW_GAP = 30
 
 
 def value_is_right(key_region, value_region):
@@ -23,6 +24,7 @@ def value_is_right(key_region, value_region):
 
 def filter_prediction_links(prediction):
     """Lọc link sai và cập nhật VALUE không còn link hợp lệ thành OTHER."""
+    filter_distant_same_row_candidates(prediction["regions"])
     region_by_id = {
         region["id"]: region
         for region in prediction["regions"]
@@ -41,6 +43,11 @@ def filter_prediction_links(prediction):
         for link in links:
             key_region = region_by_id[link["key_region_id"]]
             value_region = region_by_id[link["value_region_id"]]
+            if (
+                "KEY" not in key_region.get("labels", [])
+                or "VALUE" not in value_region.get("labels", [])
+            ):
+                continue
             if value_is_right(key_region, value_region):
                 filtered_links.append(link)
                 valid_value_ids.add(value_region["id"])
@@ -72,6 +79,85 @@ def filter_prediction_links(prediction):
         if region["id"] in rejected_value_ids - valid_value_ids:
             region["labels"] = ["OTHER"]
     return prediction
+
+
+def _same_row(first, second):
+    """Kiểm tra hai bbox có cùng một hàng hay không."""
+    first_box = first["bbox"]
+    second_box = second["bbox"]
+    overlap = min(first_box[3], second_box[3]) - max(
+        first_box[1],
+        second_box[1],
+    )
+    if overlap > 0:
+        return True
+    first_center = (first_box[1] + first_box[3]) / 2
+    second_center = (second_box[1] + second_box[3]) / 2
+    return abs(first_center - second_center) <= max(
+        first_box[3] - first_box[1],
+        second_box[3] - second_box[1],
+    ) * 0.5
+
+
+def _horizontal_gap(first, second):
+    """Tính khoảng cách ngang giữa hai bbox."""
+    first_box = first["bbox"]
+    second_box = second["bbox"]
+    left, right = sorted((first_box, second_box), key=lambda box: box[0])
+    return max(0, right[0] - left[2])
+
+
+def _below_field_table(region, field_tables):
+    """Kiểm tra region nằm dưới và cùng cột với một FIELD_TABLE."""
+    region_box = region["bbox"]
+    for field_table in field_tables:
+        table_box = field_table["bbox"]
+        x_overlap = min(region_box[2], table_box[2]) - max(
+            region_box[0],
+            table_box[0],
+        )
+        if x_overlap > 0 and region_box[1] >= table_box[3]:
+            return True
+    return False
+
+
+def filter_distant_same_row_candidates(regions):
+    """Loại candidate cùng role ở xa candidate thật bên dưới FIELD_TABLE."""
+    field_tables = [
+        region
+        for region in regions
+        if "FIELD_TABLE" in region.get("labels", [])
+    ]
+    if not field_tables:
+        return regions
+
+    candidates_by_role = {
+        role: [
+            region
+            for region in regions
+            if role in region.get("labels", [])
+        ]
+        for role in ("KEY", "VALUE")
+    }
+    false_positive_ids = set()
+    for candidates in candidates_by_role.values():
+        for index, first in enumerate(candidates):
+            for second in candidates[index + 1:]:
+                if not _same_row(first, second):
+                    continue
+                if _horizontal_gap(first, second) <= SAME_ROW_GAP:
+                    continue
+                first_is_true = _below_field_table(first, field_tables)
+                second_is_true = _below_field_table(second, field_tables)
+                if first_is_true and not second_is_true:
+                    false_positive_ids.add(second["id"])
+                elif second_is_true and not first_is_true:
+                    false_positive_ids.add(first["id"])
+
+    for region in regions:
+        if region["id"] in false_positive_ids:
+            region["labels"] = ["OTHER"]
+    return regions
 
 
 def _has_layout_barrier(first, second, regions):
