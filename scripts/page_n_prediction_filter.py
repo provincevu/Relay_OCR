@@ -1,13 +1,15 @@
 # Mục đích: lọc link KEY → VALUE và phục hồi region bị tách khỏi pair.
 # Chức năng: lọc link, nối fragment cùng role với pair gần nhất và hỗ trợ output chỉ gồm region đã ghép cặp.
 # Luồng xử lý: nhận prediction → lọc từng nhóm link → phục hồi fragment → lọc nhãn không có cặp.
-# Cấu hình/parameter: so sánh hình học bbox; cùng region được xem là inline.
+# Cấu hình/parameter: so sánh hình học bbox; cùng region được xem là inline;
+# tolerance vùng ngang FIELD_TABLE mặc định là 4% chiều rộng page.
 # Quan hệ: dùng chung bởi Page3LayoutModel, viewer và script sửa predictions.json.
 # Input/output: nhận một prediction dict và cập nhật trực tiếp dict đó.
 # Contract: giữ nguyên region ID, text, bbox, score và role không liên quan đến link.
 
 OVERLAP_TOLERANCE = 10
 SAME_ROW_GAP = 30
+FIELD_TABLE_X_TOLERANCE = 0.04  # 4% chiều rộng page cho mỗi phía.
 
 
 def value_is_right(key_region, value_region):
@@ -121,25 +123,67 @@ def _below_field_table(region, field_tables):
     return False
 
 
-def filter_distant_same_row_candidates(regions):
+def field_table_x_ranges(regions, image_width):
+    """Lấy các vùng ngang của FIELD_TABLE theo tỷ lệ chiều rộng page."""
+    return [
+        (
+            region["bbox"][0] / image_width,
+            region["bbox"][2] / image_width,
+        )
+        for region in regions
+        if "FIELD_TABLE" in region.get("labels", [])
+    ]
+
+
+def _inherited_field_table_scope(
+    region,
+    field_table_x_ranges,
+    image_width,
+    tolerance,
+):
+    """Kiểm tra bbox có nằm trong vùng ngang FIELD_TABLE kế thừa không."""
+    region_box = region["bbox"]
+    region_left = region_box[0] / image_width
+    region_right = region_box[2] / image_width
+    for table_left, table_right in field_table_x_ranges:
+        expanded_left = max(0, table_left - tolerance)
+        expanded_right = min(1, table_right + tolerance)
+        if min(region_right, expanded_right) > max(
+            region_left,
+            expanded_left,
+        ):
+            return True
+    return False
+
+
+def filter_distant_same_row_candidates(
+    regions,
+    inherited_field_table_x_ranges=None,
+    image_width=None,
+    field_table_x_tolerance=FIELD_TABLE_X_TOLERANCE,
+):
     """Loại KEY/VALUE cùng hàng FIELD_TABLE hoặc ở xa candidate thật."""
     field_tables = [
         region
         for region in regions
         if "FIELD_TABLE" in region.get("labels", [])
     ]
-    if not field_tables:
+    if not field_tables and not inherited_field_table_x_ranges:
         return regions
 
-    same_row_field_table_ids = {
-        region["id"]
-        for region in regions
-        if set(region.get("labels", [])).intersection({"KEY", "VALUE"})
-        and any(_same_row(region, field_table) for field_table in field_tables)
-    }
-    for region in regions:
-        if region["id"] in same_row_field_table_ids:
-            region["labels"] = ["OTHER"]
+    if field_tables:
+        same_row_field_table_ids = {
+            region["id"]
+            for region in regions
+            if set(region.get("labels", [])).intersection({"KEY", "VALUE"})
+            and any(
+                _same_row(region, field_table)
+                for field_table in field_tables
+            )
+        }
+        for region in regions:
+            if region["id"] in same_row_field_table_ids:
+                region["labels"] = ["OTHER"]
 
     candidates_by_role = {
         role: [
@@ -157,8 +201,22 @@ def filter_distant_same_row_candidates(regions):
                     continue
                 if _horizontal_gap(first, second) <= SAME_ROW_GAP:
                     continue
-                first_is_true = _below_field_table(first, field_tables)
-                second_is_true = _below_field_table(second, field_tables)
+                if field_tables:
+                    first_is_true = _below_field_table(first, field_tables)
+                    second_is_true = _below_field_table(second, field_tables)
+                else:
+                    first_is_true = _inherited_field_table_scope(
+                        first,
+                        inherited_field_table_x_ranges,
+                        image_width,
+                        field_table_x_tolerance,
+                    )
+                    second_is_true = _inherited_field_table_scope(
+                        second,
+                        inherited_field_table_x_ranges,
+                        image_width,
+                        field_table_x_tolerance,
+                    )
                 if first_is_true and not second_is_true:
                     false_positive_ids.add(second["id"])
                 elif second_is_true and not first_is_true:
@@ -363,3 +421,49 @@ def filter_unlinked_regions(prediction):
             if role in labels
         ] or ["OTHER"]
     return prediction
+
+
+def filter_prediction_pages(
+    pages,
+    field_table_x_tolerance=FIELD_TABLE_X_TOLERANCE,
+):
+    """Lọc tuần tự các page và kế thừa vùng ngang FIELD_TABLE."""
+    ordered_pages = sorted(
+        pages,
+        key=lambda page: (
+            page.get("pdf_name", ""),
+            page.get("physical_page", 0),
+        ),
+    )
+    inherited_field_table_x_ranges = None
+    previous_pdf_name = None
+    previous_physical_page = None
+    for page in ordered_pages:
+        pdf_name = page.get("pdf_name")
+        physical_page = page.get("physical_page")
+        if pdf_name != previous_pdf_name:
+            inherited_field_table_x_ranges = None
+        elif (
+            previous_physical_page is not None
+            and physical_page is not None
+            and physical_page != previous_physical_page + 1
+        ):
+            inherited_field_table_x_ranges = None
+
+        filter_distant_same_row_candidates(
+            page["regions"],
+            inherited_field_table_x_ranges,
+            page["image_width"],
+            field_table_x_tolerance,
+        )
+        filter_prediction_links(page)
+        filter_unlinked_regions(page)
+        current_field_table_x_ranges = field_table_x_ranges(
+            page["regions"],
+            page["image_width"],
+        )
+        if current_field_table_x_ranges:
+            inherited_field_table_x_ranges = current_field_table_x_ranges
+        previous_pdf_name = pdf_name
+        previous_physical_page = physical_page
+    return pages

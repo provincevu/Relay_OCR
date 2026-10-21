@@ -14,16 +14,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 if __package__:
-    from .page_n_prediction_filter import (
-        filter_prediction_links,
-        filter_unlinked_regions,
-    )
+    from .page_n_prediction_filter import filter_prediction_pages
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from page_n_prediction_filter import (
-        filter_prediction_links,
-        filter_unlinked_regions,
-    )
+    from page_n_prediction_filter import filter_prediction_pages
 
 
 HOST = "127.0.0.1"
@@ -32,10 +26,7 @@ PORT = 8002
 
 def build_html(dataset):
     """Tạo giao diện chỉ đọc từ predictions.json."""
-    pages = []
-    for page in dataset["pages"]:
-        filter_prediction_links(page)
-        pages.append(filter_unlinked_regions(page))
+    pages = filter_prediction_pages(dataset["pages"])
     pages_json = json.dumps(pages, ensure_ascii=False).replace(
         "</",
         "<\\/",

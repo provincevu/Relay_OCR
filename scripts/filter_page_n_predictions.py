@@ -12,16 +12,10 @@ import sys
 from pathlib import Path
 
 if __package__:
-    from .page_n_prediction_filter import (
-        filter_prediction_links,
-        filter_unlinked_regions,
-    )
+    from .page_n_prediction_filter import filter_prediction_pages
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from page_n_prediction_filter import (
-        filter_prediction_links,
-        filter_unlinked_regions,
-    )
+    from page_n_prediction_filter import filter_prediction_pages
 
 
 def main():
@@ -35,35 +29,35 @@ def main():
     arguments = parser.parse_args()
 
     dataset = json.loads(arguments.predictions.read_text(encoding="utf-8"))
-    removed_links = 0
-    changed_regions = 0
-    for page in dataset["pages"]:
-        links_before = sum(
-            len(links)
-            for links in page.get(
-                "links_by_mode",
-                {"selected": page.get("links", [])},
-            ).values()
-        )
-        other_before = sum(
-            "OTHER" in region.get("labels", [])
-            for region in page["regions"]
-        )
-        filter_prediction_links(page)
-        filter_unlinked_regions(page)
-        links_after = sum(
-            len(links)
-            for links in page.get(
-                "links_by_mode",
-                {"selected": page.get("links", [])},
-            ).values()
-        )
-        removed_links += links_before - links_after
-        other_after = sum(
-            "OTHER" in region.get("labels", [])
-            for region in page["regions"]
-        )
-        changed_regions += max(0, other_after - other_before)
+    links_before = sum(
+        len(links)
+        for page in dataset["pages"]
+        for links in page.get(
+            "links_by_mode",
+            {"selected": page.get("links", [])},
+        ).values()
+    )
+    other_before = sum(
+        "OTHER" in region.get("labels", [])
+        for page in dataset["pages"]
+        for region in page["regions"]
+    )
+    filter_prediction_pages(dataset["pages"])
+    links_after = sum(
+        len(links)
+        for page in dataset["pages"]
+        for links in page.get(
+            "links_by_mode",
+            {"selected": page.get("links", [])},
+        ).values()
+    )
+    other_after = sum(
+        "OTHER" in region.get("labels", [])
+        for page in dataset["pages"]
+        for region in page["regions"]
+    )
+    removed_links = links_before - links_after
+    changed_regions = max(0, other_after - other_before)
 
     arguments.predictions.write_text(
         json.dumps(dataset, ensure_ascii=False, indent=2),

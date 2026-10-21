@@ -32,7 +32,10 @@ from scripts.page3_layout_model import (
     predict_page,
     row_links,
 )
-from scripts.page_n_prediction_filter import filter_prediction_links
+from scripts.page_n_prediction_filter import (
+    filter_prediction_links,
+    filter_prediction_pages,
+)
 
 
 ROLES = [
@@ -713,6 +716,9 @@ def predict(arguments):
                 "recognition_source": "annotation manifest",
                 **prediction,
             })
+    filter_prediction_pages(predictions)
+    for prediction in predictions:
+        prediction = add_link_texts(prediction)
     arguments.output.parent.mkdir(parents=True, exist_ok=True)
     arguments.output.write_text(
         json.dumps(

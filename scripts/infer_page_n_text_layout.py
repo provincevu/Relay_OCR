@@ -25,7 +25,10 @@ from scripts.page3_layout_model import (
     encode_page,
     predict_page,
 )
-from scripts.page_n_prediction_filter import filter_unlinked_regions
+from scripts.page_n_prediction_filter import (
+    filter_prediction_pages,
+    filter_unlinked_regions,
+)
 from scripts.train_page3_text_layout import prepare_page
 from test_rule_induction_page3_plus import (
     _create_extractor,
@@ -258,6 +261,9 @@ def main():
 
     if not pages:
         raise FileNotFoundError("Không có PDF nào chứa page dữ liệu 3+.")
+    filter_prediction_pages(pages)
+    for page in pages:
+        add_link_texts(page)
     result = {
         "schema_version": 1,
         "page_range": "data_pages_3plus",
