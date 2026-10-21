@@ -24,8 +24,17 @@ def value_is_right(key_region, value_region):
     return value_center_x > key_center_x
 
 
+def force_item_field_table(regions):
+    """Ép mọi bbox có text Item thành role FIELD_TABLE."""
+    for region in regions:
+        if region.get("text", "").strip().lower() == "item":
+            region["labels"] = ["FIELD_TABLE"]
+    return regions
+
+
 def filter_prediction_links(prediction):
     """Lọc link sai và cập nhật VALUE không còn link hợp lệ thành OTHER."""
+    force_item_field_table(prediction["regions"])
     filter_distant_same_row_candidates(prediction["regions"])
     region_by_id = {
         region["id"]: region
@@ -439,6 +448,7 @@ def filter_prediction_pages(
     previous_pdf_name = None
     previous_physical_page = None
     for page in ordered_pages:
+        force_item_field_table(page["regions"])
         pdf_name = page.get("pdf_name")
         physical_page = page.get("physical_page")
         if pdf_name != previous_pdf_name:
