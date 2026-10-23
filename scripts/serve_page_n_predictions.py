@@ -1,9 +1,9 @@
 # Mục đích: hiển thị kết quả suy luận page 3+ bằng giao diện chỉ đọc.
-# Chức năng: xem ảnh, bbox OCR, nhãn Layout model và link KEY → VALUE.
-# Luồng xử lý: đọc predictions.json → tạo HTML → phục vụ qua HTTP localhost.
+# Chức năng: xem ảnh, bbox OCR, nhãn Layout model, link KEY → VALUE và lý do đổi role.
+# Luồng xử lý: đọc predictions.json/metadata → tạo HTML → phục vụ qua HTTP localhost.
 # Cấu hình/parameter: thư mục output và port HTTP.
 # Quan hệ: phục vụ output page 3+ của infer_page_n_text_layout.py.
-# Input/output: đọc predictions.json và ảnh; ghi predictions.html tạm thời.
+# Input/output: đọc predictions.json, role_change_metadata.json và ảnh; ghi predictions.html tạm thời.
 # Contract: không có API POST và không sửa predictions.json hoặc annotations.json.
 
 import argparse
@@ -24,13 +24,17 @@ HOST = "127.0.0.1"
 PORT = 8002
 
 
-def build_html(dataset):
-    """Tạo giao diện chỉ đọc từ predictions.json."""
+def build_html(dataset, reason_metadata=None):
+    """Tạo giao diện chỉ đọc từ predictions.json và metadata lý do."""
     pages = filter_prediction_pages(dataset["pages"])
     pages_json = json.dumps(pages, ensure_ascii=False).replace(
         "</",
         "<\\/",
     )
+    reason_metadata_json = json.dumps(
+        reason_metadata or {},
+        ensure_ascii=False,
+    ).replace("</", "<\\/")
     template = r"""<!doctype html>
 <html lang="vi">
 <head>
@@ -186,6 +190,20 @@ def build_html(dataset):
         }
         .link-item:hover { background: #eff6ff; border-color: #60a5fa; }
         .link-score { color: var(--muted); float: right; }
+        .reason-section { margin-top: 14px; }
+        .reason-section h3 { font-size: 14px; margin: 0 0 7px; }
+        .reason-list { display: grid; gap: 6px; }
+        .reason-item {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            line-height: 1.4;
+            padding: 7px;
+        }
+        .reason-item:hover { background: #ffedd5; border-color: #fb923c; }
+        .reason-code { color: #9a3412; font-weight: 700; }
         .empty { color: var(--muted); font-size: 13px; }
         @media (max-width: 1100px) {
             .layout { grid-template-columns: 1fr; }
@@ -233,11 +251,16 @@ def build_html(dataset):
                 <h3>KEY → VALUE</h3>
                 <div class="link-list" id="keyValueLinks"></div>
             </div>
+            <div class="reason-section">
+                <h3>Lý do đổi role thành OTHER</h3>
+                <div class="reason-list" id="roleChangeReasons"></div>
+            </div>
         </aside>
     </div>
 </main>
 <script>
 const pages = __PAGES_JSON__;
+const reasonMetadata = __REASON_METADATA_JSON__;
 const pageSelect = document.getElementById("pageSelect");
 const nextPageButton = document.getElementById("nextPageButton");
 const pagePosition = document.getElementById("pagePosition");
@@ -248,6 +271,7 @@ const stage = document.getElementById("stage");
 const pageImage = document.getElementById("pageImage");
 const linkLayer = document.getElementById("linkLayer");
 const regionDetail = document.getElementById("regionDetail");
+const roleChangeReasons = document.getElementById("roleChangeReasons");
 const showBoxes = document.getElementById("showBoxes");
 const showLinks = document.getElementById("showLinks");
 const regionMap = new Map();
@@ -283,12 +307,17 @@ function selectRegion(region) {
     if (box) box.classList.add("selected");
     const scores = Object.entries(region.scores || {})
         .map(([label, score]) => `${label}=${score.toFixed(3)}`).join(", ");
+    const codes = pages[currentPage].role_change_codes?.[region.id] || [];
+    const reasons = codes.map(code => (
+        `${code}: ${reasonMetadata[String(code)] || "Chưa có metadata cho mã này."}`
+    ));
     regionDetail.textContent = [
         `${region.id} · ${region.labels.join("/")}`,
         `Text: ${region.text}`,
         `BBox: [${region.bbox.join(", ")}]`,
         `OCR score: ${(region.ocr_score ?? 0).toFixed(3)}`,
         `Role scores: ${scores}`,
+        reasons.length ? `Lý do OTHER:\n${reasons.join("\n")}` : "",
     ].join("\n");
 }
 
@@ -404,6 +433,43 @@ function renderLinks(page) {
     }
 }
 
+function renderRoleChangeReasons(page) {
+    roleChangeReasons.replaceChildren();
+    const regionById = new Map(
+        page.regions.map(region => [region.id, region]),
+    );
+    for (const [regionId, codes] of Object.entries(
+        page.role_change_codes || {},
+    )) {
+        const region = regionById.get(regionId);
+        if (!region) continue;
+        const item = document.createElement("div");
+        item.className = "reason-item";
+        const title = document.createElement("div");
+        title.textContent = `${region.id} · ${region.text}`;
+        item.appendChild(title);
+        for (const code of codes) {
+            const reason = document.createElement("div");
+            const codeLabel = document.createElement("span");
+            codeLabel.className = "reason-code";
+            codeLabel.textContent = `Mã ${code}: `;
+            reason.appendChild(codeLabel);
+            reason.appendChild(document.createTextNode(
+                reasonMetadata[String(code)] || "Chưa có metadata cho mã này.",
+            ));
+            item.appendChild(reason);
+        }
+        item.addEventListener("click", () => selectRegion(region));
+        roleChangeReasons.appendChild(item);
+    }
+    if (!roleChangeReasons.children.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "Page này không có region bị đổi thành OTHER.";
+        roleChangeReasons.appendChild(empty);
+    }
+}
+
 function renderPage(index) {
     currentPage = index;
     const page = pages[index];
@@ -420,6 +486,7 @@ function renderPage(index) {
     stage.style.aspectRatio = `${page.image_width} / ${page.image_height}`;
     renderRegions(page);
     renderLinks(page);
+    renderRoleChangeReasons(page);
     drawLinks(page);
     regionDetail.textContent = "Chọn một bbox để xem chi tiết.";
 }
@@ -445,7 +512,11 @@ renderPage(0);
 </body>
 </html>
 """
-    return template.replace("__PAGES_JSON__", pages_json)
+    return (
+        template
+        .replace("__PAGES_JSON__", pages_json)
+        .replace("__REASON_METADATA_JSON__", reason_metadata_json)
+    )
 
 
 def main():
@@ -461,8 +532,17 @@ def main():
     dataset = json.loads(predictions_path.read_text(encoding="utf-8"))
     if not dataset["pages"]:
         raise ValueError("predictions.json không có page để hiển thị.")
+    metadata_path = directory / "role_change_metadata.json"
+    reason_metadata = {}
+    if metadata_path.is_file():
+        reason_metadata = json.loads(
+            metadata_path.read_text(encoding="utf-8"),
+        ).get("reason_codes", {})
     html_path = directory / "predictions.html"
-    html_path.write_text(build_html(dataset), encoding="utf-8")
+    html_path.write_text(
+        build_html(dataset, reason_metadata),
+        encoding="utf-8",
+    )
     request_handler = partial(
         SimpleHTTPRequestHandler,
         directory=str(directory),
