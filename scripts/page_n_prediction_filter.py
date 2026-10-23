@@ -126,6 +126,14 @@ def _same_row(first, second):
     ) * 0.5
 
 
+def _overlaps_field_table_y_mean(region, field_table):
+    """Kiểm tra bbox chứa tâm dọc của FIELD_TABLE."""
+    region_box = region["bbox"]
+    table_box = field_table["bbox"]
+    table_y_mean = table_box[1] + (table_box[3] - table_box[1]) / 2
+    return region_box[1] <= table_y_mean <= region_box[3]
+
+
 def _horizontal_gap(first, second):
     """Tính khoảng cách ngang giữa hai bbox."""
     first_box = first["bbox"]
@@ -239,7 +247,7 @@ def filter_distant_same_row_candidates(
             for region in regions
             if set(region.get("labels", [])).intersection({"KEY", "VALUE"})
             and any(
-                _same_row(region, field_table)
+                _overlaps_field_table_y_mean(region, field_table)
                 for field_table in field_tables
             )
         }

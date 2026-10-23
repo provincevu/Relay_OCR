@@ -1,6 +1,6 @@
 # Mục đích: đánh giá checkpoint LayoutLMv3 text + bbox trên dataset page 3+.
 # Chức năng: đo nhận diện các role region và row-link KEY → VALUE.
-# Luồng xử lý: tải checkpoint → dự đoán từng phiếu → so sánh region/cạnh với nhãn thật → ghi metric.
+# Luồng xử lý: tải checkpoint → dự đoán toàn bộ page → chạy full filter → so sánh với nhãn thật → ghi metric.
 # Cấu hình/parameter: dataset, checkpoint, device, threshold và output nhận từ command line.
 # Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.train_page3_text_layout.
 # Input/output: nhận annotations.json cùng thư mục checkpoint; ghi evaluation JSON.
@@ -21,6 +21,7 @@ from scripts.page3_layout_model import (
     encode_page,
     predict_page,
 )
+from scripts.page_n_prediction_filter import filter_prediction_pages
 from scripts.train_page3_text_layout import ROLES, prepare_page
 
 
@@ -83,7 +84,7 @@ def load_model(checkpoint_directory, device):
 
 
 def evaluate(arguments):
-    """Đánh giá các role, gồm INLINE_KEY_VALUE, và liên kết KEY/VALUE."""
+    """Đánh giá prediction sau toàn bộ filter page-level."""
     dataset = json.loads(arguments.dataset.read_text(encoding="utf-8"))
     records = [
         record
@@ -95,20 +96,11 @@ def evaluate(arguments):
     link_modes = [arguments.link_mode]
     link_counts = {mode: [0, 0, 0] for mode in link_modes}
     ignored_unlabeled = 0
+    predictions = []
 
     with torch.inference_mode():
         for record in records:
             page = prepare_page(record)
-            labels = page["annotations"]
-            known_ids = {
-                region["id"]
-                for region in page["regions"]
-                if (
-                    "UNLABELED" not in labels[region["id"]]
-                    and set(labels[region["id"]]) != {"KEY", "VALUE"}
-                )
-            }
-            ignored_unlabeled += len(page["regions"]) - len(known_ids)
             encoded = encode_page(
                 page,
                 tokenizer,
@@ -124,45 +116,67 @@ def evaluate(arguments):
                 arguments.threshold,
                 arguments.link_mode,
             )
-            predicted_labels = {
-                region["id"]: normalize_prediction_labels(region["labels"])
-                for region in prediction["regions"]
-            }
-            for role in EVALUATED_ROLES:
-                gold = {
-                    region_id
-                    for region_id in known_ids
-                    if role in labels[region_id]
-                }
-                predicted = {
-                    region_id
-                    for region_id in known_ids
-                    if role in predicted_labels[region_id]
-                }
-                counts = set_counts(gold, predicted)
-                role_counts[role] = [
-                    left + right
-                    for left, right in zip(role_counts[role], counts)
-                ]
+            predictions.append({
+                **prediction,
+                "pdf_name": record["pdf_name"],
+                "physical_page": record["physical_page"],
+                "image_width": record["image_width"],
+                "image_height": record["image_height"],
+                "_gold_annotations": page["annotations"],
+                "_gold_relations": page["relations"],
+            })
 
-            gold_links = {
-                (key_id, value_id)
-                for relation in page["relations"]
-                for key_id in relation["key_region_ids"]
-                for value_id in relation["value_region_ids"]
-                if key_id in known_ids and value_id in known_ids
+    filter_prediction_pages(predictions)
+    for prediction in predictions:
+        labels = prediction["_gold_annotations"]
+        known_ids = {
+            region["id"]
+            for region in prediction["regions"]
+            if (
+                "UNLABELED" not in labels[region["id"]]
+                and set(labels[region["id"]]) != {"KEY", "VALUE"}
+            )
+        }
+        ignored_unlabeled += len(prediction["regions"]) - len(known_ids)
+        predicted_labels = {
+            region["id"]: normalize_prediction_labels(region["labels"])
+            for region in prediction["regions"]
+        }
+        for role in EVALUATED_ROLES:
+            gold = {
+                region_id
+                for region_id in known_ids
+                if role in labels[region_id]
             }
-            predicted_links = {
-                (link["key_region_id"], link["value_region_id"])
-                for link in prediction["links"]
-                if link["key_region_id"] in known_ids
-                and link["value_region_id"] in known_ids
+            predicted = {
+                region_id
+                for region_id in known_ids
+                if role in predicted_labels[region_id]
             }
-            counts = set_counts(gold_links, predicted_links)
-            link_counts["row"] = [
+            counts = set_counts(gold, predicted)
+            role_counts[role] = [
                 left + right
-                for left, right in zip(link_counts["row"], counts)
+                for left, right in zip(role_counts[role], counts)
             ]
+
+        gold_links = {
+            (key_id, value_id)
+            for relation in prediction["_gold_relations"]
+            for key_id in relation["key_region_ids"]
+            for value_id in relation["value_region_ids"]
+            if key_id in known_ids and value_id in known_ids
+        }
+        predicted_links = {
+            (link["key_region_id"], link["value_region_id"])
+            for link in prediction["links"]
+            if link["key_region_id"] in known_ids
+            and link["value_region_id"] in known_ids
+        }
+        counts = set_counts(gold_links, predicted_links)
+        link_counts["row"] = [
+            left + right
+            for left, right in zip(link_counts["row"], counts)
+        ]
 
     role_metrics = {
         role: metric_from_counts(*counts)
