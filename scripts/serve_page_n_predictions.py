@@ -293,6 +293,10 @@ function modelRole(region) {
     ))[0];
 }
 
+function filterReasonCodes(codes) {
+    return codes.filter(code => Number(code) !== 1);
+}
+
 function roleClass(role) {
     if (role === "INLINE_KEY_VALUE") return "inline";
     return role.toLowerCase().replaceAll("_", "-");
@@ -317,7 +321,9 @@ function selectRegion(region) {
         .map(([label, score]) => `${label}=${score.toFixed(3)}`).join(", ");
     const initialRole = modelRole(region);
     const finalRole = primaryLabel(region);
-    const codes = pages[currentPage].role_change_codes?.[region.id] || [];
+    const codes = filterReasonCodes(
+        pages[currentPage].role_change_codes?.[region.id] || [],
+    );
     const reasons = codes.map(code => (
         `${code}: ${reasonMetadata[String(code)] || "Chưa có metadata cho mã này."}`
     ));
@@ -452,11 +458,13 @@ function renderRoleChangeReasons(page) {
     const regionById = new Map(
         page.regions.map(region => [region.id, region]),
     );
-    for (const [regionId, codes] of Object.entries(
+    for (const [regionId, allCodes] of Object.entries(
         page.role_change_codes || {},
     )) {
         const region = regionById.get(regionId);
         if (!region) continue;
+        const codes = filterReasonCodes(allCodes);
+        if (!codes.length) continue;
         const item = document.createElement("div");
         item.className = "reason-item";
         const title = document.createElement("div");
@@ -482,7 +490,7 @@ function renderRoleChangeReasons(page) {
     if (!roleChangeReasons.children.length) {
         const empty = document.createElement("div");
         empty.className = "empty";
-        empty.textContent = "Page này không có region bị đổi thành OTHER.";
+        empty.textContent = "Page này không có region bị filter đổi thành OTHER.";
         roleChangeReasons.appendChild(empty);
     }
 }
