@@ -2,7 +2,7 @@
 # Chức năng: học một role cho mỗi region; liên kết KEY → VALUE dùng row-link.
 # Luồng xử lý: phiếu đã xác nhận → mã hóa region → role loss → checkpoint tốt nhất;
 # hoặc embedding cache → role head → checkpoint.
-# Cấu hình/parameter: python -m scripts.train_page3_text_layout --help;
+# Cấu hình/parameter: python -m scripts.training.train_page3_text_layout --help;
 # hỗ trợ AMP, freeze encoder và gradient checkpointing.
 # Quan hệ: dùng annotations.json của serve_page3_annotations và model B hiện có.
 # Input/output: train nhận dataset đã chia bên ngoài; train-cached nhận embedding cache;
@@ -25,18 +25,18 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 
-from scripts.page3_layout_model import (
+from scripts.training.page3_layout_model import (
     Page3LayoutModel,
     encode_page,
     load_pretrained,
     predict_page,
     row_links,
 )
-from scripts.page_n_prediction_filter import (
+from scripts.inference.page_n_prediction_filter import (
     filter_prediction_links,
     filter_prediction_pages,
 )
-from scripts.role_change_metadata import write_role_change_metadata
+from scripts.inference.role_change_metadata import write_role_change_metadata
 
 
 ROLES = [

@@ -14,7 +14,7 @@ from html import escape
 from pathlib import Path
 
 
-PROJECT_DIRECTORY = Path(__file__).resolve().parents[1]
+PROJECT_DIRECTORY = Path(__file__).resolve().parents[2]
 
 
 def build_annotation_html(pages):
@@ -137,7 +137,9 @@ def main():
     html_path = directory / "annotate_page3.html"
     html_path.write_text(build_annotation_html(pages), encoding="utf-8")
     print(f"Đã tạo giao diện cho {len(pages)} phiếu: {html_path}")
-    print(f'Chạy server: python scripts/serve_page3_annotations.py "{directory}"')
+    print(
+        f'Chạy server: python -m scripts.annotation.serve_page3_annotations "{directory}"'
+    )
 
 
 if __name__ == "__main__":

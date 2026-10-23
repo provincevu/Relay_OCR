@@ -15,9 +15,9 @@ if __package__:
     from .page_n_prediction_filter import filter_prediction_pages
     from .role_change_metadata import write_role_change_metadata
 else:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from page_n_prediction_filter import filter_prediction_pages
-    from role_change_metadata import write_role_change_metadata
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from scripts.inference.page_n_prediction_filter import filter_prediction_pages
+    from scripts.inference.role_change_metadata import write_role_change_metadata
 
 
 def main():

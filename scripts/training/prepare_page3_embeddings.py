@@ -15,11 +15,11 @@ from pathlib import Path
 import torch
 from transformers import LayoutLMv3TokenizerFast
 
-from scripts.page3_layout_model import (
+from scripts.training.page3_layout_model import (
     iter_page_chunks,
     load_pretrained,
 )
-from scripts.train_page3_text_layout import ROLES, _load_pages
+from scripts.training.train_page3_text_layout import ROLES, _load_pages
 
 
 def parse_arguments():

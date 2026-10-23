@@ -183,7 +183,7 @@ def main():
             directory,
             arguments.image_directory,
         )
-        from annotate_page3 import build_annotation_html
+        from scripts.annotation.annotate_page3 import build_annotation_html
 
         (directory / "annotate_page3.html").write_text(
             build_annotation_html(manifest_pages),

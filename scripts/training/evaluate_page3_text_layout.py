@@ -2,7 +2,7 @@
 # Chức năng: đo nhận diện các role region và row-link KEY → VALUE.
 # Luồng xử lý: tải checkpoint → dự đoán toàn bộ page → chạy full filter → so sánh với nhãn thật → ghi metric.
 # Cấu hình/parameter: dataset, checkpoint, device, threshold và output nhận từ command line.
-# Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.train_page3_text_layout.
+# Quan hệ: dùng chung Page3LayoutModel, tokenizer và encode_page với scripts.training.train_page3_text_layout.
 # Input/output: nhận annotations.json cùng thư mục checkpoint; ghi evaluation JSON.
 # Contract: đánh giá INLINE_KEY_VALUE; bỏ qua UNLABELED và inline legacy; liên kết nhiều region được tính theo từng cạnh KEY → VALUE.
 
@@ -14,15 +14,15 @@ from pathlib import Path
 import torch
 from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3TokenizerFast
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.page3_layout_model import (
+from scripts.training.page3_layout_model import (
     Page3LayoutModel,
     encode_page,
     predict_page,
 )
-from scripts.page_n_prediction_filter import filter_prediction_pages
-from scripts.train_page3_text_layout import ROLES, prepare_page
+from scripts.inference.page_n_prediction_filter import filter_prediction_pages
+from scripts.training.train_page3_text_layout import ROLES, prepare_page
 
 
 EVALUATED_ROLES = ROLES

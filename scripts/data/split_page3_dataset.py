@@ -2,7 +2,7 @@
 # Chức năng: xáo trộn các phiếu theo seed và ghi ba dataset cùng schema đầu vào.
 # Luồng xử lý: đọc dataset → chia theo tỷ lệ → ghi dataset_train.json, dataset_val.json, dataset_test.json.
 # Cấu hình/parameter: tỷ lệ train/val/test và seed nhận từ command line.
-# Quan hệ: đầu ra được dùng bởi scripts.train_page3_text_layout.
+# Quan hệ: đầu ra được dùng bởi scripts.training.train_page3_text_layout.
 # Input/output: nhận annotations.json; ghi ba file JSON vào thư mục output.
 # Contract: giữ schema_version, khóa pages và toàn bộ nội dung từng phiếu; chỉ thay đổi tập phiếu.
 

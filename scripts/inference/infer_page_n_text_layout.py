@@ -17,20 +17,20 @@ from time import perf_counter
 import torch
 from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3TokenizerFast
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.export_pages_3plus import DPI
-from scripts.page3_layout_model import (
+from scripts.data.export_pages_3plus import DPI
+from scripts.training.page3_layout_model import (
     Page3LayoutModel,
     encode_page,
     predict_page,
 )
-from scripts.page_n_prediction_filter import (
+from scripts.inference.page_n_prediction_filter import (
     filter_prediction_pages,
     filter_unlinked_regions,
 )
-from scripts.role_change_metadata import write_role_change_metadata
-from scripts.train_page3_text_layout import prepare_page
+from scripts.inference.role_change_metadata import write_role_change_metadata
+from scripts.training.train_page3_text_layout import prepare_page
 from test_rule_induction_page3_plus import (
     _create_extractor,
     _process_image,

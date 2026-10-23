@@ -13,7 +13,7 @@ if __package__:
         record_role_change,
     )
 else:
-    from role_change_metadata import (
+    from scripts.inference.role_change_metadata import (
         initialize_role_change_codes,
         record_role_change,
     )

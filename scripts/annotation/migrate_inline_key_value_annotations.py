@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 
-PROJECT_DIRECTORY = Path(__file__).resolve().parents[1]
+PROJECT_DIRECTORY = Path(__file__).resolve().parents[2]
 DATASET_PATHS = (
     (
         PROJECT_DIRECTORY / "data/page3plus_dataset/annotations.json",

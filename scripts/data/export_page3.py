@@ -12,7 +12,7 @@ import subprocess
 from pathlib import Path
 
 
-PROJECT_DIRECTORY = Path(__file__).resolve().parents[1]
+PROJECT_DIRECTORY = Path(__file__).resolve().parents[2]
 INPUT_DIRECTORY = PROJECT_DIRECTORY / "data" / "pdf"
 OUTPUT_DIRECTORY = PROJECT_DIRECTORY / "data" / "page3"
 CACHE_PATH = (

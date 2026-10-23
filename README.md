@@ -10,14 +10,14 @@ theo rule: 2 page thì train/test mỗi tập một page; từ 3 page trở lên
 ưu tiên phần dư theo thứ tự train, test, val.
 
 ```bash
-python scripts/build_page3plus_dataset.py
+python -m scripts.data.build_page3plus_dataset
 ```
 
 Kết quả nằm trong `data/page3plus_dataset/`, gồm ảnh PNG, `manifest.json` ở
 gốc và manifest riêng trong từng split. Có thể thay đổi DPI hoặc seed:
 
 ```bash
-python scripts/build_page3plus_dataset.py --dpi 400 --seed 42
+python -m scripts.data.build_page3plus_dataset --dpi 400 --seed 42
 ```
 
 Nếu chạy lại để tạo mới dataset, thêm `--overwrite`.

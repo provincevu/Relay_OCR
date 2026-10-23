@@ -18,7 +18,7 @@ The first data page follows ``scripts/export_pages_3plus.py`` exactly:
 
 Example:
 
-    python scripts/build_page3plus_dataset.py
+    python -m scripts.data.build_page3plus_dataset
 
 For a form with 2 pages, the split is 1 train and 1 test. For 3-5 pages, each
 split gets one page first and remaining pages go in the order train, test, val.
@@ -42,11 +42,11 @@ from pathlib import Path
 
 try:
     from .export_pages_3plus import find_first_data_page
-except ImportError:  # Allows ``python scripts/build_page3plus_dataset.py``.
-    from export_pages_3plus import find_first_data_page
+except ImportError:  # Hỗ trợ chạy module từ thư mục gốc dự án.
+    from scripts.data.export_pages_3plus import find_first_data_page
 
 
-PROJECT_DIRECTORY = Path(__file__).resolve().parents[1]
+PROJECT_DIRECTORY = Path(__file__).resolve().parents[2]
 DEFAULT_INPUT_DIRECTORY = PROJECT_DIRECTORY / "data" / "pdf"
 DEFAULT_OUTPUT_DIRECTORY = PROJECT_DIRECTORY / "data" / "page3plus_dataset"
 DEFAULT_DPI = 400

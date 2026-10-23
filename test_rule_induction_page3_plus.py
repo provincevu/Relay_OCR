@@ -18,7 +18,7 @@ from time import perf_counter
 
 import cv2
 
-from scripts.export_pages_3plus import DPI, find_first_data_page
+from scripts.data.export_pages_3plus import DPI, find_first_data_page
 from test_table_key_value_page3_plus import Page3PlusKeyValueExtractor
 
 

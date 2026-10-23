@@ -13,7 +13,7 @@ from pathlib import Path
 import cv2
 
 
-INPUT_DIRECTORY = Path(__file__).resolve().parents[1] / "data" / "pdf"
+INPUT_DIRECTORY = Path(__file__).resolve().parents[2] / "data" / "pdf"
 OUTPUT_DIRECTORY = INPUT_DIRECTORY / "page3plus_png"
 DPI = 400
 PAGE_2 = 2

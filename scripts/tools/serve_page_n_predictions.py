@@ -14,10 +14,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 if __package__:
-    from .page_n_prediction_filter import filter_prediction_pages
+    from scripts.inference.page_n_prediction_filter import filter_prediction_pages
 else:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from page_n_prediction_filter import filter_prediction_pages
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from scripts.inference.page_n_prediction_filter import filter_prediction_pages
 
 
 HOST = "127.0.0.1"
