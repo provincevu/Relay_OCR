@@ -1,6 +1,6 @@
 # Mục đích: định nghĩa contract mã lý do đổi role của region.
-# Chức năng: khởi tạo vùng mã lý do trong từng page và ghi file metadata tra cứu.
-# Luồng xử lý: nhận danh sách page → bảo đảm mỗi page có role_change_codes → ghi metadata.
+# Chức năng: khởi tạo, cập nhật vùng mã lý do và ghi file metadata tra cứu.
+# Luồng xử lý: nhận danh sách page/region → ghi mã số → ghi metadata khi xuất file.
 # Cấu hình/parameter: mã lý do là số nguyên; file metadata dùng tên cố định.
 # Quan hệ: được dùng bởi pipeline lọc predictions và các script ghi predictions.json.
 # Input/output: cập nhật trực tiếp page dict và ghi role_change_metadata.json.
@@ -28,6 +28,13 @@ def initialize_role_change_codes(pages):
     for page in pages:
         page.setdefault("role_change_codes", {})
     return pages
+
+
+def record_role_change(role_change_codes, region_id, reason_code):
+    """Ghi một mã lý do cho region và không lặp lại mã đã có."""
+    codes = role_change_codes.setdefault(region_id, [])
+    if reason_code not in codes:
+        codes.append(reason_code)
 
 
 def write_role_change_metadata(directory):

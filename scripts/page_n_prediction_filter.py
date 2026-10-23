@@ -8,9 +8,15 @@
 # Contract: giữ nguyên region ID, text, bbox, score và role không liên quan đến link.
 
 if __package__:
-    from .role_change_metadata import initialize_role_change_codes
+    from .role_change_metadata import (
+        initialize_role_change_codes,
+        record_role_change,
+    )
 else:
-    from role_change_metadata import initialize_role_change_codes
+    from role_change_metadata import (
+        initialize_role_change_codes,
+        record_role_change,
+    )
 
 OVERLAP_TOLERANCE = 10
 SAME_ROW_GAP = 30
@@ -39,8 +45,12 @@ def force_field_table_headers(regions):
 
 def filter_prediction_links(prediction):
     """Lọc link sai và cập nhật VALUE không còn link hợp lệ thành OTHER."""
+    role_change_codes = prediction.setdefault("role_change_codes", {})
     force_field_table_headers(prediction["regions"])
-    filter_distant_same_row_candidates(prediction["regions"])
+    filter_distant_same_row_candidates(
+        prediction["regions"],
+        role_change_codes=role_change_codes,
+    )
     region_by_id = {
         region["id"]: region
         for region in prediction["regions"]
@@ -94,6 +104,7 @@ def filter_prediction_links(prediction):
     for region in prediction["regions"]:
         if region["id"] in rejected_value_ids - valid_value_ids:
             region["labels"] = ["OTHER"]
+            record_role_change(role_change_codes, region["id"], 5)
     return prediction
 
 
@@ -209,6 +220,7 @@ def filter_distant_same_row_candidates(
     inherited_field_table_x_ranges=None,
     image_width=None,
     field_table_x_tolerance=FIELD_TABLE_X_TOLERANCE,
+    role_change_codes=None,
 ):
     """Loại KEY/VALUE cùng hàng FIELD_TABLE hoặc ở xa candidate thật."""
     field_tables = [
@@ -216,6 +228,8 @@ def filter_distant_same_row_candidates(
         for region in regions
         if "FIELD_TABLE" in region.get("labels", [])
     ]
+    if role_change_codes is None:
+        role_change_codes = {}
     if not field_tables and not inherited_field_table_x_ranges:
         return regions
 
@@ -232,6 +246,7 @@ def filter_distant_same_row_candidates(
         for region in regions:
             if region["id"] in same_row_field_table_ids:
                 region["labels"] = ["OTHER"]
+                record_role_change(role_change_codes, region["id"], 2)
 
     candidates_by_role = {
         role: [
@@ -265,8 +280,32 @@ def filter_distant_same_row_candidates(
                 )
                 if first_is_true and not second_is_true:
                     false_positive_ids.add(second["id"])
+                    reason_code = 4 if (
+                        not field_tables
+                        or second["bbox"][1] < min(
+                            field_table["bbox"][1]
+                            for field_table in field_tables
+                        )
+                    ) else 3
+                    record_role_change(
+                        role_change_codes,
+                        second["id"],
+                        reason_code,
+                    )
                 elif second_is_true and not first_is_true:
                     false_positive_ids.add(first["id"])
+                    reason_code = 4 if (
+                        not field_tables
+                        or first["bbox"][1] < min(
+                            field_table["bbox"][1]
+                            for field_table in field_tables
+                        )
+                    ) else 3
+                    record_role_change(
+                        role_change_codes,
+                        first["id"],
+                        reason_code,
+                    )
 
     for region in regions:
         if region["id"] in false_positive_ids:
@@ -446,6 +485,7 @@ def repair_split_links(prediction):
 
 def filter_unlinked_regions(prediction):
     """Đổi KEY/VALUE không có link thành OTHER và giữ nguyên role khác."""
+    role_change_codes = prediction.setdefault("role_change_codes", {})
     repair_split_links(prediction)
     linked_key_ids = {
         link["key_region_id"]
@@ -460,8 +500,10 @@ def filter_unlinked_regions(prediction):
         labels = set(region.get("labels", []))
         if "KEY" in labels and region["id"] not in linked_key_ids:
             labels.discard("KEY")
+            record_role_change(role_change_codes, region["id"], 6)
         if "VALUE" in labels and region["id"] not in linked_value_ids:
             labels.discard("VALUE")
+            record_role_change(role_change_codes, region["id"], 7)
         region["labels"] = [
             role for role in original_labels
             if role in labels
@@ -503,6 +545,7 @@ def filter_prediction_pages(
             inherited_field_table_x_ranges,
             page["image_width"],
             field_table_x_tolerance,
+            page["role_change_codes"],
         )
         filter_prediction_links(page)
         filter_unlinked_regions(page)

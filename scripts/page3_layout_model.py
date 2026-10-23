@@ -24,6 +24,7 @@ from .page_n_prediction_filter import (
     filter_distant_same_row_candidates,
     filter_prediction_links,
 )
+from .role_change_metadata import record_role_change
 
 
 class Page3LayoutModel(nn.Module):
@@ -256,6 +257,7 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
     role_logits = model(encoded, len(page["regions"]))
     role_scores = role_logits.softmax(dim=-1).cpu().tolist()
     regions = []
+    role_change_codes = {}
     for region, scores in zip(page["regions"], role_scores, strict=True):
         best_role_index = max(range(len(scores)), key=scores.__getitem__)
         role = roles[best_role_index]
@@ -268,7 +270,12 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
             "labels": [role],
             "scores": dict(zip(roles, scores, strict=True)),
         })
-    filter_distant_same_row_candidates(regions)
+        if role == "OTHER":
+            record_role_change(role_change_codes, region["id"], 1)
+    filter_distant_same_row_candidates(
+        regions,
+        role_change_codes=role_change_codes,
+    )
     row_key_value_links = row_links(
         regions,
         "KEY",
@@ -278,6 +285,7 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
     )
     result = {
         "regions": regions,
+        "role_change_codes": role_change_codes,
         "link_mode": link_mode,
         "links": row_key_value_links,
     }
