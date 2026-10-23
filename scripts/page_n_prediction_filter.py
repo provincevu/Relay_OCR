@@ -7,6 +7,11 @@
 # Input/output: nhận một prediction dict và cập nhật trực tiếp dict đó.
 # Contract: giữ nguyên region ID, text, bbox, score và role không liên quan đến link.
 
+if __package__:
+    from .role_change_metadata import initialize_role_change_codes
+else:
+    from role_change_metadata import initialize_role_change_codes
+
 OVERLAP_TOLERANCE = 10
 SAME_ROW_GAP = 30
 FIELD_TABLE_X_TOLERANCE = 0.04  # 4% chiều rộng page cho mỗi phía.
@@ -469,6 +474,7 @@ def filter_prediction_pages(
     field_table_x_tolerance=FIELD_TABLE_X_TOLERANCE,
 ):
     """Lọc tuần tự các page và kế thừa vùng ngang FIELD_TABLE."""
+    initialize_role_change_codes(pages)
     ordered_pages = sorted(
         pages,
         key=lambda page: (

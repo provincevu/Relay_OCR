@@ -29,6 +29,7 @@ from scripts.page_n_prediction_filter import (
     filter_prediction_pages,
     filter_unlinked_regions,
 )
+from scripts.role_change_metadata import write_role_change_metadata
 from scripts.train_page3_text_layout import prepare_page
 from test_rule_induction_page3_plus import (
     _create_extractor,
@@ -280,6 +281,7 @@ def main():
         json.dumps(result, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    write_role_change_metadata(output_path.parent)
     print(
         f"Đã lưu {processed_pages} page dữ liệu 3+ từ {total_files} PDF: "
         f"{output_path} ({perf_counter() - total_started:.1f}s)",

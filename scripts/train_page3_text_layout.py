@@ -36,6 +36,7 @@ from scripts.page_n_prediction_filter import (
     filter_prediction_links,
     filter_prediction_pages,
 )
+from scripts.role_change_metadata import write_role_change_metadata
 
 
 ROLES = [
@@ -735,6 +736,7 @@ def predict(arguments):
         ),
         encoding="utf-8",
     )
+    write_role_change_metadata(arguments.output.parent)
     print(f"Đã lưu dự đoán {len(predictions)} phiếu: {arguments.output}")
 
 

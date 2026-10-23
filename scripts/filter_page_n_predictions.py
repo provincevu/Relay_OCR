@@ -13,9 +13,11 @@ from pathlib import Path
 
 if __package__:
     from .page_n_prediction_filter import filter_prediction_pages
+    from .role_change_metadata import write_role_change_metadata
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from page_n_prediction_filter import filter_prediction_pages
+    from role_change_metadata import write_role_change_metadata
 
 
 def main():
@@ -63,6 +65,7 @@ def main():
         json.dumps(dataset, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+    write_role_change_metadata(arguments.predictions.parent)
     print(
         f"Đã cập nhật {len(dataset['pages'])} page: "
         f"loại {removed_links} link, đổi {changed_regions} region thành OTHER."
