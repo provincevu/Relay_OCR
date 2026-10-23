@@ -285,6 +285,14 @@ function primaryLabel(region) {
     return region.labels[0] || "OTHER";
 }
 
+function modelRole(region) {
+    const scoredRoles = Object.entries(region.scores || {});
+    if (!scoredRoles.length) return "Không có score";
+    return scoredRoles.reduce((best, current) => (
+        current[1] > best[1] ? current : best
+    ))[0];
+}
+
 function roleClass(role) {
     if (role === "INLINE_KEY_VALUE") return "inline";
     return role.toLowerCase().replaceAll("_", "-");
@@ -307,17 +315,23 @@ function selectRegion(region) {
     if (box) box.classList.add("selected");
     const scores = Object.entries(region.scores || {})
         .map(([label, score]) => `${label}=${score.toFixed(3)}`).join(", ");
+    const initialRole = modelRole(region);
+    const finalRole = primaryLabel(region);
     const codes = pages[currentPage].role_change_codes?.[region.id] || [];
     const reasons = codes.map(code => (
         `${code}: ${reasonMetadata[String(code)] || "Chưa có metadata cho mã này."}`
     ));
     regionDetail.textContent = [
-        `${region.id} · ${region.labels.join("/")}`,
+        `${region.id}`,
+        `Role model ban đầu: ${initialRole}`,
+        `Role cuối cùng: ${finalRole}`,
         `Text: ${region.text}`,
         `BBox: [${region.bbox.join(", ")}]`,
         `OCR score: ${(region.ocr_score ?? 0).toFixed(3)}`,
         `Role scores: ${scores}`,
-        reasons.length ? `Lý do OTHER:\n${reasons.join("\n")}` : "",
+        reasons.length
+            ? `Mã lý do:\n${reasons.join("\n")}`
+            : "Không có thay đổi role bởi filter.",
     ].join("\n");
 }
 
@@ -448,6 +462,9 @@ function renderRoleChangeReasons(page) {
         const title = document.createElement("div");
         title.textContent = `${region.id} · ${region.text}`;
         item.appendChild(title);
+        const roleSummary = document.createElement("div");
+        roleSummary.textContent = `${modelRole(region)} → ${primaryLabel(region)}`;
+        item.appendChild(roleSummary);
         for (const code of codes) {
             const reason = document.createElement("div");
             const codeLabel = document.createElement("span");
