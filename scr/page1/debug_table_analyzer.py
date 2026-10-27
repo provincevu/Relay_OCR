@@ -17,8 +17,8 @@ from paddleocr import (
     TextRecognition,
 )
 
-from scr.services.detector import Detector
-from scr.services.recognitor import Recognitor
+from scr.services.Detector.detector import Detector
+from scr.services.Recognitor.recognitor import Recognitor
 
 from .debug_table_cells import DebugTableCellsMixin
 from .debug_table_fields import DebugTableFieldsMixin

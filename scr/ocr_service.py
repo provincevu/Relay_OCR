@@ -1,10 +1,10 @@
 import cv2
 import numpy as np
 
-from .services.detector import Detector
-from .services.image_preprocessing import ImagePreprocessing
-from .services.page1.table_1_analysis import Table1Analysis
-from .services.recognitor import Recognitor
+from .services.Detector.detector import Detector
+from .services.ImagePreprocessing.image_preprocessing import ImagePreprocessing
+from .page1.table_1_analysis import Table1Analysis
+from .services.Recognitor.recognitor import Recognitor
 
 # Mục đích: cung cấp dịch vụ OCR kết hợp tiền xử lý, detection và recognition.
 # Chức năng: OCR text thông thường và trích xuất field TABLE 01 trên page 1.
