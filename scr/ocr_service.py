@@ -1,6 +1,6 @@
-import cv2
 import json
-import numpy as np
+
+import cv2
 
 from .services.PageEvidence import PageEvidenceService
 from .page1.table_1_analysis import Table1Analysis
@@ -12,6 +12,8 @@ from .page1.table_1_analysis import Table1Analysis
 # Quan hệ: phối hợp PageEvidenceService và Table1Analysis.
 # Input/output: nhận ảnh hoặc PDF; trả kết quả trong bộ nhớ.
 # Contract: giữ detect_text(), recognize_text(), analyze_page1() và thêm process_pdf().
+
+INPUT_LOADER_RENDER_DPI = 400
 
 
 class OCRService:
@@ -52,7 +54,15 @@ class OCRService:
         """Xử lý một PDF nhiều phiếu và trả kết quả theo từng phiếu."""
         from .services.InputLoader import InputLoader
 
-        input_loader = InputLoader(self.config, self.page_evidence)
+        input_loader_config = dict(self.config)
+        input_loader_config.setdefault(
+            "input_loader_render_dpi",
+            INPUT_LOADER_RENDER_DPI,
+        )
+        input_loader = InputLoader(
+            input_loader_config,
+            self.page_evidence,
+        )
         input_metadata = input_loader.load(pdf_path)
         page3_inference = None
         documents = []
@@ -115,27 +125,24 @@ class OCRService:
         )
 
     def _build_page3_record(self, image_path, page, pdf_name):
-        """Tạo page record từ ảnh và kết quả OCR hiện có."""
+        """Tạo page record chuẩn từ metadata OCR đã có."""
         image = cv2.imread(str(image_path))
-        recognition_results = self.recognize_text(image_path)
         regions = []
 
-        for index, result in enumerate(recognition_results, start=1):
-            box = np.array(result["box"], dtype=np.float32)
-            x_min, y_min = box.min(axis=0).astype(int)
-            x_max, y_max = box.max(axis=0).astype(int)
+        for region in page["ocr_regions"]:
             regions.append(
                 {
-                    "id": f"region_{index:04d}",
-                    "text": result["text"],
-                    "bbox": [x_min, y_min, x_max, y_max],
-                    "score": None,
+                    "id": region["id"],
+                    "text": region["text"],
+                    "bbox": region["bbox"],
+                    "score": region.get("score"),
                 },
             )
 
         return {
             "pdf_name": pdf_name,
             "physical_page": page["source_pdf_page_number"],
+            "document_page_number": page["document_page_number"],
             "image_name": page["image_name"],
             "image_path": str(image_path),
             "image_width": int(image.shape[1]),

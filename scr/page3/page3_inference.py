@@ -4,7 +4,7 @@
 # Cấu hình/parameter: page3_checkpoint, page3_device và page3_threshold.
 # Quan hệ: dùng Page3LayoutModel hiện có và TextPostprocessing.
 # Input/output: nhận page record đã OCR; trả prediction giữ metadata page.
-# Contract: giữ region ID, text, bbox và metadata pdf_name/physical_page.
+# Contract: giữ region ID, text, bbox và metadata pdf_name/physical_page/document_page_number.
 
 from pathlib import Path
 
@@ -66,6 +66,9 @@ class Page3Inference:
                 "physical_page": page_record.get(
                     "physical_page",
                     page_record.get("physicalPage"),
+                ),
+                "document_page_number": page_record.get(
+                    "document_page_number",
                 ),
                 "image_name": page_record.get(
                     "image_name",

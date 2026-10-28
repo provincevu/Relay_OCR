@@ -14,6 +14,7 @@ import tempfile
 import unicodedata
 from pathlib import Path
 
+import cv2
 from pypdf import PdfReader
 
 from scr.services.PageEvidence import PageEvidenceService
@@ -54,12 +55,12 @@ class InputLoader:
                     source_page_number,
                     temporary_directory,
                 )
-                text = self._recognize_page(image_path)
+                ocr_regions = self._recognize_page(image_path)
                 pages.append(
                     self._build_page_evidence(
                         source_page_number,
                         image_path,
-                        text,
+                        ocr_regions,
                     ),
                 )
 
@@ -129,12 +130,19 @@ class InputLoader:
         return image_path
 
     def _recognize_page(self, image_path):
-        """Nhận dạng text dùng để xác định ranh giới phiếu."""
+        """Nhận dạng và giữ lại các vùng text của một page."""
         results = self.page_evidence.recognize(str(image_path))
-        return " ".join(result["text"] for result in results)
+        return self._recover_pagination(image_path, results)
 
-    def _build_page_evidence(self, source_page_number, image_path, text):
-        """Tạo thông tin tối thiểu để phân đoạn và phân loại page."""
+    def _build_page_evidence(
+        self,
+        source_page_number,
+        image_path,
+        ocr_regions,
+    ):
+        """Tạo evidence phân đoạn và giữ metadata OCR của page."""
+        ocr_regions = self._normalize_ocr_regions(ocr_regions)
+        text = " ".join(region["text"] for region in ocr_regions)
         current_page, total_pages = self._read_page_number(text)
         normalized_text = self._normalize(text)
         has_cover_signature = any(
@@ -152,7 +160,148 @@ class InputLoader:
             "current_page": current_page,
             "total_pages": total_pages,
             "is_form_start": current_page == 1 or has_cover_signature,
+            "ocr_regions": ocr_regions,
         }
+
+    def _recover_pagination(self, image_path, ocr_regions):
+        """OCR lại vùng pagination khi kết quả hiện tại chưa đủ số page."""
+        text = " ".join(result["text"] for result in ocr_regions)
+        current_page, total_pages = self._read_page_number(text)
+        if current_page is not None and total_pages is not None:
+            return ocr_regions
+
+        pagination_box = self._find_pagination_box(image_path, ocr_regions)
+        if pagination_box is None:
+            return ocr_regions
+
+        recovered = self.page_evidence.recognize_region(
+            str(image_path),
+            pagination_box,
+        )
+        recovered_text = " ".join(
+            [text, recovered["text"]],
+        )
+        current_page, total_pages = self._read_page_number(recovered_text)
+        if current_page is None or total_pages is None:
+            return ocr_regions
+
+        return [
+            result
+            for result in ocr_regions
+            if not self._boxes_overlap(result["box"], pagination_box)
+        ] + [recovered]
+
+    def _find_pagination_box(self, image_path, ocr_regions):
+        """Tìm dòng nghi ngờ chứa pagination để OCR lại."""
+        image = cv2.imread(str(image_path))
+        image_height, image_width = image.shape[:2]
+        markers = [
+            result
+            for result in ocr_regions
+            if self._box_center_y(result["box"]) <= image_height * 0.45
+            and re.search(
+                r"trang|page|/|\bof\b|\btren\b",
+                self._normalize(result["text"]),
+            )
+        ]
+        if not markers:
+            return None
+
+        marker_box = min(
+            (result["box"] for result in markers),
+            key=self._box_center_y,
+        )
+        marker_y = sum(point[1] for point in marker_box) / len(marker_box)
+        marker_height = max(
+            point[1] for point in marker_box
+        ) - min(point[1] for point in marker_box)
+        line_results = [
+            result
+            for result in ocr_regions
+            if abs(self._box_center_y(result["box"]) - marker_y)
+            <= max(marker_height * 2, image_height * 0.01)
+        ]
+        if not line_results:
+            return None
+
+        x_min = min(
+            point[0]
+            for result in line_results
+            for point in result["box"]
+        )
+        y_min = min(
+            point[1]
+            for result in line_results
+            for point in result["box"]
+        )
+        x_max = max(
+            point[0]
+            for result in line_results
+            for point in result["box"]
+        )
+        y_max = max(
+            point[1]
+            for result in line_results
+            for point in result["box"]
+        )
+        return [
+            [
+                max(0, x_min - image_width * 0.01),
+                max(0, y_min - image_height * 0.004),
+            ],
+            [
+                min(image_width - 1, x_max + image_width * 0.12),
+                max(0, y_min - image_height * 0.004),
+            ],
+            [
+                min(image_width - 1, x_max + image_width * 0.12),
+                min(image_height - 1, y_max + image_height * 0.004),
+            ],
+            [
+                max(0, x_min - image_width * 0.01),
+                min(image_height - 1, y_max + image_height * 0.004),
+            ],
+        ]
+
+    def _normalize_ocr_regions(self, ocr_regions):
+        """Chuẩn hóa region OCR trước khi ghi metadata."""
+        normalized_regions = []
+        for index, region in enumerate(ocr_regions, start=1):
+            box = region["box"]
+            normalized_regions.append(
+                {
+                    "id": f"region_{index:04d}",
+                    "text": region["text"],
+                    "box": box,
+                    "bbox": self._box_to_bbox(box),
+                    "score": region.get("score"),
+                },
+            )
+        return normalized_regions
+
+    def _box_to_bbox(self, box):
+        """Đổi polygon OCR thành bounding box."""
+        return [
+            min(point[0] for point in box),
+            min(point[1] for point in box),
+            max(point[0] for point in box),
+            max(point[1] for point in box),
+        ]
+
+    def _box_center_y(self, box):
+        """Tính tọa độ dọc trung tâm của polygon."""
+        return sum(point[1] for point in box) / len(box)
+
+    def _boxes_overlap(self, first_box, second_box):
+        """Kiểm tra hai box có giao nhau hay không."""
+        first = self._box_to_bbox(first_box)
+        second = self._box_to_bbox(second_box)
+        return not (
+            first[2] < second[0]
+            or second[2] < first[0]
+            or first[3] < second[1]
+            or second[3] < first[1]
+        )
 
     def _read_page_number(self, text):
         """Đọc số page hiện tại và tổng số page từ text OCR."""
@@ -219,9 +368,13 @@ class InputLoader:
             page_metadata.append(
                 {
                     "image_path": f"{document_id}/{image_name}",
+                    "image_name": image_name,
                     "image_index": image_index,
                     "source_pdf_page_number": page["source_page_number"],
                     "document_page_number": document_page_number,
+                    "current_page": page["current_page"],
+                    "total_pages": page["total_pages"],
+                    "ocr_regions": page["ocr_regions"],
                     "page_type": self._classify_page(
                         document_page_number,
                         is_comment_page,
