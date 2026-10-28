@@ -22,7 +22,7 @@ from scr.services.PageEvidence import PageEvidenceService
 class InputLoader:
     """Đọc PDF nhiều phiếu và tạo ảnh, metadata cho từng phiếu."""
 
-    def __init__(self, config):
+    def __init__(self, config, page_evidence=None):
         self.config = config
         self.output_directory = Path(
             config.get(
@@ -32,7 +32,7 @@ class InputLoader:
         )
         self.render_dpi = config.get("input_loader_render_dpi", 200)
         self.renderer = config.get("input_loader_renderer")
-        self.page_evidence = PageEvidenceService(config)
+        self.page_evidence = page_evidence or PageEvidenceService(config)
 
     def load(self, pdf_path):
         """Đọc một PDF và ghi ảnh, metadata cho các phiếu tìm được."""

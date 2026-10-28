@@ -1,17 +1,17 @@
+import cv2
+import json
 import numpy as np
 
-from .services.Detector.detector import Detector
-from .services.ImagePreprocessing.image_preprocessing import ImagePreprocessing
+from .services.PageEvidence import PageEvidenceService
 from .page1.table_1_analysis import Table1Analysis
-from .services.Recognitor.recognitor import Recognitor
 
 # Mục đích: cung cấp dịch vụ OCR kết hợp tiền xử lý, detection và recognition.
-# Chức năng: OCR text thông thường và trích xuất field TABLE 01 trên page 1.
-# Luồng xử lý: ảnh đầu vào → preprocessing → OCR text hoặc Table1Analysis.
+# Chức năng: OCR ảnh, trích xuất TABLE 01 page 1 và điều phối PDF nhiều phiếu.
+# Luồng xử lý: ảnh → preprocessing → OCR hoặc PDF → InputLoader → page services.
 # Cấu hình: nhận một dict config và truyền cho các service bên dưới.
-# Quan hệ: phối hợp ImagePreprocessing, Detector, Recognitor và Table1Analysis.
-# Input/output: nhận đường dẫn ảnh; trả text hoặc fields/table trong bộ nhớ.
-# Contract: giữ detect_text(), recognize_text() và bổ sung analyze_page1().
+# Quan hệ: phối hợp PageEvidenceService và Table1Analysis.
+# Input/output: nhận ảnh hoặc PDF; trả kết quả trong bộ nhớ.
+# Contract: giữ detect_text(), recognize_text(), analyze_page1() và thêm process_pdf().
 
 
 class OCRService:
@@ -20,9 +20,10 @@ class OCRService:
     # Khởi tạo các service và dùng chung model text cho TABLE 01.
     def __init__(self, config):
         self.config = config
-        self.image_preprocessing = ImagePreprocessing(config)
-        self.detector = Detector(config)
-        self.recognitor = Recognitor(config)
+        self.page_evidence = PageEvidenceService(config)
+        self.image_preprocessing = self.page_evidence.image_preprocessing
+        self.detector = self.page_evidence.detector
+        self.recognitor = self.page_evidence.recognitor
         self.table_1_analysis = Table1Analysis(
             config,
             self.detector,
@@ -39,30 +40,105 @@ class OCRService:
     # Nhận dạng text trong toàn bộ polygon được phát hiện.
     def recognize_text(self, image):
         # Tiền xử lý ảnh trước khi detection và recognition
-        processed_image = self.image_preprocessing.preprocess(image)
-        source_image = processed_image
-        detection_results = self.detector.detect(processed_image)
-        results = []
-
-        # Duyệt các polygon text và nhận dạng riêng từng crop.
-        for result in detection_results:
-            for box in result["dt_polys"]:
-                box = np.array(box, dtype=np.float32)
-
-                # Cắt vùng chữ theo hình chữ nhật bao quanh polygon detection
-                x_min, y_min = box.min(axis=0).astype(int)
-                x_max, y_max = box.max(axis=0).astype(int)
-                crop = source_image[y_min:y_max, x_min:x_max]
-
-                # Xoay crop theo hướng dòng chữ nếu được bật
-                crop = self.image_preprocessing.preprocess_textline(crop)
-                text = self.recognitor.recognize(crop)
-                results.append({"box": box.tolist(), "text": text})
-
-        return results
+        return self.page_evidence.recognize(image)
 
     # Trích xuất field TABLE 01 từ ảnh page 1.
     def analyze_page1(self, image_path):
         """Trả fields và table của page 1 mà không tạo output file."""
         image = self.image_preprocessing.preprocess(image_path)
         return self.table_1_analysis.analyze(image)
+
+    def process_pdf(self, pdf_path):
+        """Xử lý một PDF nhiều phiếu và trả kết quả theo từng phiếu."""
+        from .services.InputLoader import InputLoader
+
+        input_loader = InputLoader(self.config, self.page_evidence)
+        input_metadata = input_loader.load(pdf_path)
+        page3_inference = None
+        documents = []
+
+        for document in input_metadata["documents"]:
+            document_metadata = self._read_document_metadata(
+                input_loader.output_directory,
+                document["document_id"],
+            )
+            page1_result = None
+            page3_records = []
+
+            for page in document_metadata["pages"]:
+                image_path = (
+                    input_loader.output_directory / page["image_path"]
+                )
+                if page["page_type"] == "PAGE_1":
+                    page1_result = self.analyze_page1(image_path)
+                elif page["page_type"] == "PAGE_3_PLUS":
+                    page3_records.append(
+                        self._build_page3_record(
+                            image_path,
+                            page,
+                            input_metadata["source_pdf"]["name"],
+                        ),
+                    )
+
+            page3_result = []
+            if page3_records:
+                if page3_inference is None:
+                    from .page3 import Page3Inference
+
+                    page3_inference = Page3Inference(self.config)
+                page3_result = page3_inference.infer_pages(page3_records)
+
+            documents.append(
+                {
+                    "document_id": document_metadata["document_id"],
+                    "source_page_start": document_metadata[
+                        "source_page_start"
+                    ],
+                    "source_page_end": document_metadata[
+                        "source_page_end"
+                    ],
+                    "page1": page1_result,
+                    "page3_plus": page3_result,
+                },
+            )
+
+        return {
+            "source_pdf": input_metadata["source_pdf"],
+            "documents": documents,
+        }
+
+    def _read_document_metadata(self, output_directory, document_id):
+        """Đọc metadata của một phiếu đã được InputLoader tạo."""
+        metadata_path = output_directory / document_id / "metadata.json"
+        return json.loads(
+            metadata_path.read_text(encoding="utf-8"),
+        )
+
+    def _build_page3_record(self, image_path, page, pdf_name):
+        """Tạo page record từ ảnh và kết quả OCR hiện có."""
+        image = cv2.imread(str(image_path))
+        recognition_results = self.recognize_text(image_path)
+        regions = []
+
+        for index, result in enumerate(recognition_results, start=1):
+            box = np.array(result["box"], dtype=np.float32)
+            x_min, y_min = box.min(axis=0).astype(int)
+            x_max, y_max = box.max(axis=0).astype(int)
+            regions.append(
+                {
+                    "id": f"region_{index:04d}",
+                    "text": result["text"],
+                    "bbox": [x_min, y_min, x_max, y_max],
+                    "score": None,
+                },
+            )
+
+        return {
+            "pdf_name": pdf_name,
+            "physical_page": page["source_pdf_page_number"],
+            "image_name": page["image_name"],
+            "image_path": str(image_path),
+            "image_width": int(image.shape[1]),
+            "image_height": int(image.shape[0]),
+            "regions": regions,
+        }
