@@ -20,11 +20,11 @@ from transformers import (
     LayoutLMv3TokenizerFast,
 )
 
-from .page_n_prediction_filter import (
+from scripts.inference.page_n_prediction_filter import (
     filter_distant_same_row_candidates,
     filter_prediction_links,
 )
-from .role_change_metadata import record_role_change
+from scripts.inference.role_change_metadata import record_role_change
 
 
 class Page3LayoutModel(nn.Module):
