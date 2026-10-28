@@ -6,7 +6,7 @@ cùng metadata để các service OCR xử lý tiếp.
 ## Sử dụng
 
 ```python
-from scr.scripts.InputLoader import InputLoader
+from scr.services.InputLoader import InputLoader
 
 config = {
     "input_loader_output": "output/inference/splitted_pdf",

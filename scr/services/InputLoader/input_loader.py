@@ -2,7 +2,7 @@
 # Chức năng: đếm page, xác định ranh giới phiếu, phân loại page, render ảnh và ghi metadata.
 # Luồng xử lý: PDF gốc → OCR evidence → segment phiếu → ảnh PNG → metadata.json.
 # Cấu hình/parameter: output_directory, input_loader_render_dpi và input_loader_renderer.
-# Quan hệ: dùng OCRService để đọc evidence; không tạo PDF con và không sửa PDF gốc.
+# Quan hệ: dùng PageEvidenceService để đọc evidence; không tạo PDF con và không sửa PDF gốc.
 # Input/output: nhận một đường dẫn PDF; ghi thư mục phiếu và input_metadata.json.
 # Contract: mỗi ảnh có image_path, source_pdf_page_number và document_page_number; chỉ số ảnh bắt đầu từ 001.
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 from pypdf import PdfReader
 
-from scr.ocr_service import OCRService
+from scr.services.PageEvidence import PageEvidenceService
 
 
 class InputLoader:
@@ -32,7 +32,7 @@ class InputLoader:
         )
         self.render_dpi = config.get("input_loader_render_dpi", 200)
         self.renderer = config.get("input_loader_renderer")
-        self.ocr_service = OCRService(config)
+        self.page_evidence = PageEvidenceService(config)
 
     def load(self, pdf_path):
         """Đọc một PDF và ghi ảnh, metadata cho các phiếu tìm được."""
@@ -130,7 +130,7 @@ class InputLoader:
 
     def _recognize_page(self, image_path):
         """Nhận dạng text dùng để xác định ranh giới phiếu."""
-        results = self.ocr_service.recognize_text(str(image_path))
+        results = self.page_evidence.recognize(str(image_path))
         return " ".join(result["text"] for result in results)
 
     def _build_page_evidence(self, source_page_number, image_path, text):
@@ -224,7 +224,7 @@ class InputLoader:
                     "document_page_number": document_page_number,
                     "page_type": self._classify_page(
                         document_page_number,
-                        page["is_comment_page"],
+                        is_comment_page,
                     ),
                 },
             )
