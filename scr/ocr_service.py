@@ -1,4 +1,3 @@
-import cv2
 import numpy as np
 
 from .services.Detector.detector import Detector
@@ -65,5 +64,5 @@ class OCRService:
     # Trích xuất field TABLE 01 từ ảnh page 1.
     def analyze_page1(self, image_path):
         """Trả fields và table của page 1 mà không tạo output file."""
-        image = cv2.imread(str(image_path))
+        image = self.image_preprocessing.preprocess(image_path)
         return self.table_1_analysis.analyze(image)
