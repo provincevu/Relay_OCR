@@ -1,0 +1,6 @@
+{
+  "page3_checkpoint": "output/checkpoints/page3plus_full_finetune_2",
+  "table_01_fields_path": "./config/table_01_fields.json",
+  "device": "cuda:0",
+  "recognition_device": "cuda:0",
+}
