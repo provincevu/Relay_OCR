@@ -1,0 +1,10 @@
+{
+  "device": "cpu",
+  "engine": "paddle_static",
+  "recognition_device": "cpu",
+  "page3_device": "cuda",
+  "recognition_model": "vgg_transformer",
+  "page3_checkpoint": "output/checkpoints/page3plus_medium",
+  "table_01_fields_path": "./config/table_01_fields.json",
+  "input_loader_render_dpi": 400
+}
