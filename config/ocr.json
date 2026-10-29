@@ -1,4 +1,5 @@
 {
+<<<<<<< HEAD
   "device": "cpu",
   "engine": "paddle_static",
   "recognition_device": "cpu",
@@ -8,3 +9,10 @@
   "table_01_fields_path": "./config/table_01_fields.json",
   "input_loader_render_dpi": 400
 }
+=======
+  "page3_checkpoint": "output/checkpoints/page3plus_full_finetune_2",
+  "table_01_fields_path": "./config/table_01_fields.json",
+  "device": "cuda:0",
+  "recognition_device": "cuda:0",
+}
+>>>>>>> cef6f208ae9e60675a3fa27b8cb04dd3e044887e
