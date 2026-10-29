@@ -9,17 +9,78 @@
 import argparse
 from email import policy
 from email.parser import BytesParser
+import hashlib
 import json
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import shutil
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from scr.ocr_service import OCRService
+from scripts.inference.role_change_metadata import ROLE_CHANGE_REASON_METADATA
 
 
 HOST = "127.0.0.1"
 PORT = 8003
+CACHE_SCHEMA_VERSION = 1
+DEBUG_CACHE_DIRECTORY = "_debug_cache"
+
+REASON_METADATA_JSON = json.dumps(
+    {
+        str(code): description
+        for code, description in ROLE_CHANGE_REASON_METADATA.items()
+    },
+    ensure_ascii=False,
+).replace("</", "<\\/")
+
+
+def build_cache_key(pdf_bytes, config):
+    """Tạo cache key theo nội dung PDF và cấu hình OCR hiện tại."""
+    cache_config = {
+        key: value
+        for key, value in config.items()
+        if key != "input_loader_output"
+    }
+    config_bytes = json.dumps(
+        {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "config": cache_config,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    ).encode("utf-8")
+    digest = hashlib.sha256()
+    digest.update(pdf_bytes)
+    digest.update(b"\0")
+    digest.update(config_bytes)
+    return digest.hexdigest()
+
+
+def load_debug_cache(cache_directory, output_directory):
+    """Nạp kết quả và ảnh từ cache nếu cache đầy đủ và hợp lệ."""
+    result_path = cache_directory / "process_result.json"
+    cached_output = cache_directory / "splitted_pdf"
+    if not result_path.is_file() or not cached_output.is_dir():
+        return None
+    if output_directory.exists():
+        shutil.rmtree(output_directory)
+    shutil.copytree(cached_output, output_directory)
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
+def save_debug_cache(cache_directory, output_directory, process_result):
+    """Lưu kết quả và ảnh đã render để phục vụ debug lần chạy sau."""
+    cache_directory.mkdir(parents=True, exist_ok=True)
+    cached_output = cache_directory / "splitted_pdf"
+    if cached_output.exists():
+        shutil.rmtree(cached_output)
+    shutil.copytree(output_directory, cached_output)
+    (cache_directory / "process_result.json").write_text(
+        json.dumps(process_result, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 HTML = r"""<!doctype html>
@@ -87,6 +148,10 @@ HTML = r"""<!doctype html>
         .region-item, .link-item { cursor: pointer; font-size: 12px; line-height: 1.4; }
         .region-item:hover, .link-item:hover { background: #eff6ff; border-color: #60a5fa; }
         .link-score { color: #64748b; float: right; }
+        .link-list, .reason-list { display: grid; gap: 6px; }
+        .reason-item { background: #fff7ed; border: 1px solid #fed7aa; border-radius: 6px; cursor: pointer; font-size: 12px; line-height: 1.4; padding: 7px; }
+        .reason-item:hover { background: #ffedd5; border-color: #fb923c; }
+        .reason-code { color: #9a3412; font-weight: 700; }
         pre { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; max-height: 340px; overflow: auto; padding: 9px; white-space: pre-wrap; }
         .empty { color: #64748b; font-size: 13px; }
         @media (max-width: 1000px) { .layout { grid-template-columns: 1fr; } }
@@ -101,6 +166,7 @@ HTML = r"""<!doctype html>
     <form class="toolbar" id="uploadForm">
         <input id="pdfInput" name="pdf" type="file" accept="application/pdf" required>
         <button type="submit">Xử lý PDF</button>
+        <label><input id="reuseCache" name="reuse_cache" type="checkbox"> Dùng cache debug</label>
         <button id="previousDocument" type="button" disabled>← Phiếu trước</button>
         <button id="nextDocument" type="button" disabled>Phiếu sau →</button>
         <span id="documentPosition"></span>
@@ -113,6 +179,7 @@ HTML = r"""<!doctype html>
         <button id="nextPage" type="button" disabled>Page sau →</button>
         <span id="pagePosition"></span>
         <label><input id="showBoxes" type="checkbox" checked> Bbox</label>
+        <label><input id="showOther" type="checkbox"> OTHER</label>
         <label><input id="showLinks" type="checkbox" checked> Link</label>
     </div>
     <div class="layout">
@@ -124,35 +191,13 @@ HTML = r"""<!doctype html>
             </div>
         </section>
         <aside class="panel">
-            <div class="muted" id="pageSummary"></div>
-            <div class="legend">
-                <span class="key">KEY</span>
-                <span class="value">VALUE</span>
-                <span class="header">HEADER</span>
-                <span class="field-table">FIELD_TABLE</span>
-                <span class="note">NOTE</span>
-                <span class="page-number">PAGE_NUMBER</span>
-                <span class="form-number">FORM_NUMBER</span>
-                <span class="inline">INLINE_KEY_VALUE</span>
-                <span class="other">OTHER</span>
-            </div>
-            <div class="role-summary" id="roleSummary"></div>
-            <div class="detail" id="regionDetail">Chọn một bbox để xem chi tiết.</div>
-            <div class="section">
-                <h3>Thông tin trích xuất</h3>
-                <div id="fields"></div>
-            </div>
-            <div class="section">
-                <h3>Region OCR / prediction</h3>
-                <div id="regions"></div>
-            </div>
             <div class="section">
                 <h3>Link KEY → VALUE</h3>
-                <div id="links"></div>
+                <div class="link-list" id="links"></div>
             </div>
             <div class="section">
-                <h3>JSON kết quả page</h3>
-                <pre id="pageJson">Chưa có dữ liệu.</pre>
+                <h3>Lý do đổi role thành OTHER</h3>
+                <div class="reason-list" id="roleChangeReasons"></div>
             </div>
         </aside>
     </div>
@@ -172,15 +217,12 @@ const pageTitle = document.getElementById("pageTitle");
 const pageImage = document.getElementById("pageImage");
 const stage = document.getElementById("stage");
 const linkLayer = document.getElementById("linkLayer");
-const pageSummary = document.getElementById("pageSummary");
-const roleSummary = document.getElementById("roleSummary");
-const regionDetail = document.getElementById("regionDetail");
-const fields = document.getElementById("fields");
-const regions = document.getElementById("regions");
 const links = document.getElementById("links");
-const pageJson = document.getElementById("pageJson");
+const roleChangeReasons = document.getElementById("roleChangeReasons");
 const showBoxes = document.getElementById("showBoxes");
+const showOther = document.getElementById("showOther");
 const showLinks = document.getElementById("showLinks");
+const reasonMetadata = __REASON_METADATA_JSON__;
 const regionMap = new Map();
 const regionBoxMap = new Map();
 let result = null;
@@ -189,10 +231,6 @@ let pageIndex = 0;
 
 function clear(element) {
     element.replaceChildren();
-}
-
-function showValue(value) {
-    return typeof value === "string" ? value : JSON.stringify(value, null, 2);
 }
 
 function renderDocument() {
@@ -224,12 +262,6 @@ function renderPage(index) {
     nextPage.disabled = pageIndex === formDocument.pages.length - 1;
     pageTitle.textContent = `${formDocument.document_id} · ${page.page_type}`;
     const pageResult = page.result;
-    const regionCount = pageResult?.regions?.length || 0;
-    const linkCount = pageResult?.links?.length || 0;
-    pageSummary.textContent = [
-        `Page trong phiếu: ${page.document_page_number} · Page PDF gốc: ${page.source_pdf_page_number}`,
-        `${regionCount} region · ${linkCount} link KEY → VALUE`,
-    ].join("\n");
     if (pageResult?.image_width && pageResult?.image_height) {
         stage.style.aspectRatio = `${pageResult.image_width} / ${pageResult.image_height}`;
     } else {
@@ -238,32 +270,9 @@ function renderPage(index) {
     pageImage.src = page.image_url;
     renderRegions(pageResult);
     drawLinks(pageResult);
-    renderRoleSummary(pageResult);
-    regionDetail.textContent = "Chọn một bbox để xem chi tiết.";
-    clear(fields);
-    clear(regions);
     clear(links);
-    pageJson.textContent = JSON.stringify(pageResult || {}, null, 2);
-    renderFields(pageResult);
-    renderRegionList(pageResult);
     renderLinks(pageResult);
-}
-
-function renderFields(pageResult) {
-    if (!pageResult) {
-        fields.innerHTML = '<div class="empty">Page này chưa có kết quả inference.</div>';
-        return;
-    }
-    if (pageResult.fields) {
-        Object.entries(pageResult.fields).forEach(([name, value]) => {
-            const item = document.createElement("div");
-            item.className = "field";
-            item.textContent = `${name}: ${showValue(value)}`;
-            fields.appendChild(item);
-        });
-        return;
-    }
-    fields.innerHTML = '<div class="empty">Page này không có field TABLE 01.</div>';
+    renderRoleChangeReasons(pageResult);
 }
 
 function primaryLabel(region) {
@@ -295,22 +304,6 @@ function selectRegion(region) {
     regionBoxMap.forEach((box) => box.classList.remove("selected"));
     const box = regionBoxMap.get(region.id);
     if (box) box.classList.add("selected");
-    const scores = Object.entries(region.scores || {})
-        .map(([label, score]) => `${label}=${Number(score).toFixed(3)}`)
-        .join(", ");
-    const bestRole = Object.entries(region.scores || {}).reduce(
-        (best, current) => current[1] > best[1] ? current : best,
-        ["Không có score", -1],
-    )[0];
-    regionDetail.textContent = [
-        `${region.id}`,
-        `Role: ${primaryLabel(region)}`,
-        `Role model cao nhất: ${bestRole}`,
-        `Text: ${region.text || ""}`,
-        `BBox: [${(region.bbox || []).join(", ")}]`,
-        `OCR score: ${Number(region.ocr_score ?? 0).toFixed(3)}`,
-        `Role scores: ${scores || "Không có"}`,
-    ].join("\n");
 }
 
 function renderRegions(pageResult) {
@@ -327,8 +320,6 @@ function renderRegions(pageResult) {
         const bbox = region.bbox;
         if (!bbox || bbox.length < 4) return;
         const label = primaryLabel(region);
-        // Không vẽ bbox cho các region bị phân loại là OTHER.
-        if (label === "OTHER") return;
         const box = document.createElement("div");
         box.className = `region-box ${roleClass(label)}`;
         box.style.left = percent(bbox[0], width);
@@ -352,25 +343,13 @@ function renderRegions(pageResult) {
     updateBoxVisibility();
 }
 
-function renderRoleSummary(pageResult) {
-    if (!pageResult?.regions?.length) {
-        roleSummary.textContent = "Page này không có prediction role.";
-        return;
-    }
-    const counts = {};
-    pageResult.regions.forEach((region) => {
-        const role = primaryLabel(region);
-        counts[role] = (counts[role] || 0) + 1;
-    });
-    roleSummary.textContent = Object.entries(counts)
-        .sort(([first], [second]) => first.localeCompare(second))
-        .map(([role, count]) => `${role}: ${count}`)
-        .join(" · ");
-}
-
 function updateBoxVisibility() {
     regionBoxMap.forEach((box) => {
-        box.style.display = showBoxes.checked ? "block" : "none";
+        const isOther = box.classList.contains("other");
+        box.style.display = showBoxes.checked
+            && (showOther.checked || !isOther)
+            ? "block"
+            : "none";
     });
 }
 
@@ -407,20 +386,6 @@ function drawLinks(pageResult) {
     }
 }
 
-function renderRegionList(pageResult) {
-    if (!pageResult || !pageResult.regions?.length) {
-        regions.innerHTML = '<div class="empty">Không có region prediction.</div>';
-        return;
-    }
-    pageResult.regions.forEach((region) => {
-        const item = document.createElement("div");
-        item.className = "field region-item";
-        item.textContent = `${region.id} · ${primaryLabel(region)}: ${region.text || ""}`;
-        item.addEventListener("click", () => selectRegion(region));
-        regions.appendChild(item);
-    });
-}
-
 function renderLinks(pageResult) {
     if (!pageResult || !pageResult.links?.length) {
         links.innerHTML = '<div class="empty">Không có link KEY → VALUE.</div>';
@@ -452,6 +417,48 @@ function renderLinks(pageResult) {
     });
 }
 
+function renderRoleChangeReasons(pageResult) {
+    roleChangeReasons.replaceChildren();
+    if (!pageResult?.role_change_codes || !pageResult.regions?.length) {
+        roleChangeReasons.innerHTML = '<div class="empty">Không có region đổi thành OTHER.</div>';
+        return;
+    }
+    const regionById = new Map(
+        pageResult.regions.map((region) => [region.id, region]),
+    );
+    for (const [regionId, allCodes] of Object.entries(
+        pageResult.role_change_codes,
+    )) {
+        const region = regionById.get(regionId);
+        const codes = allCodes.filter((code) => Number(code) !== 1);
+        if (!region || !codes.length) continue;
+        const item = document.createElement("div");
+        item.className = "reason-item";
+        const title = document.createElement("div");
+        title.textContent = `${region.id} · ${region.text || ""}`;
+        item.appendChild(title);
+        const role = document.createElement("div");
+        role.textContent = `Role hiện tại: ${primaryLabel(region)}`;
+        item.appendChild(role);
+        codes.forEach((code) => {
+            const reason = document.createElement("div");
+            const codeLabel = document.createElement("span");
+            codeLabel.className = "reason-code";
+            codeLabel.textContent = `Mã ${code}: `;
+            reason.appendChild(codeLabel);
+            reason.appendChild(document.createTextNode(
+                reasonMetadata[String(code)] || "Chưa có mô tả cho mã này.",
+            ));
+            item.appendChild(reason);
+        });
+        item.addEventListener("click", () => selectRegion(region));
+        roleChangeReasons.appendChild(item);
+    }
+    if (!roleChangeReasons.children.length) {
+        roleChangeReasons.innerHTML = '<div class="empty">Không có region đổi thành OTHER (không tính mã 1).</div>';
+    }
+}
+
 form.addEventListener("submit", async (event) => {
     event.preventDefault();
     if (!input.files.length) return;
@@ -466,7 +473,10 @@ form.addEventListener("submit", async (event) => {
         return;
     }
     documentIndex = 0;
-    statusText.textContent = `Đã xử lý ${result.documents.length} phiếu.`;
+    const cacheStatus = result._debug_cache?.hit
+        ? " Đã dùng cache debug."
+        : " Đã lưu cache debug cho lần sau.";
+    statusText.textContent = `Đã xử lý ${result.documents.length} phiếu.${cacheStatus}`;
     renderDocument();
 });
 
@@ -493,6 +503,7 @@ nextPage.addEventListener("click", () => {
     if (pageIndex < pages.length - 1) renderPage(pageIndex + 1);
 });
 showBoxes.addEventListener("change", updateBoxVisibility);
+showOther.addEventListener("change", updateBoxVisibility);
 showLinks.addEventListener("change", () => {
     const page = result?.documents?.[documentIndex]?.pages?.[pageIndex];
     drawLinks(page?.result);
@@ -600,6 +611,11 @@ class OCRRequestHandler(SimpleHTTPRequestHandler):
             + b"\r\nMIME-Version: 1.0\r\n\r\n"
             + body,
         )
+        reuse_cache = any(
+            part.get_param("name", header="content-disposition")
+            == "reuse_cache"
+            for part in message.walk()
+        )
         file_part = next(
             part for part in message.walk()
             if part.get_filename()
@@ -608,13 +624,36 @@ class OCRRequestHandler(SimpleHTTPRequestHandler):
         job_directory = self.server.output_root / job_id
         job_directory.mkdir(parents=True, exist_ok=True)
         source_pdf = job_directory / "source.pdf"
-        source_pdf.write_bytes(file_part.get_payload(decode=True))
+        pdf_bytes = file_part.get_payload(decode=True)
+        source_pdf.write_bytes(pdf_bytes)
 
         output_directory = job_directory / "splitted_pdf"
         config = dict(self.server.ocr_config)
         config["input_loader_output"] = str(output_directory)
-        process_result = OCRService(config).process_pdf(str(source_pdf))
+        cache_key = build_cache_key(pdf_bytes, config)
+        cache_directory = (
+            self.server.output_root
+            / DEBUG_CACHE_DIRECTORY
+            / cache_key
+        )
+        process_result = (
+            load_debug_cache(cache_directory, output_directory)
+            if reuse_cache
+            else None
+        )
+        cache_hit = process_result is not None
+        if process_result is None:
+            process_result = OCRService(config).process_pdf(str(source_pdf))
+            save_debug_cache(
+                cache_directory,
+                output_directory,
+                process_result,
+            )
         result = build_result(job_id, output_directory, process_result)
+        result["_debug_cache"] = {
+            "hit": cache_hit,
+            "key": cache_key,
+        }
         self._send_json(result)
 
     def translate_path(self, path):
@@ -626,7 +665,10 @@ class OCRRequestHandler(SimpleHTTPRequestHandler):
 
     def _send_html(self):
         """Trả HTML giao diện OCR."""
-        data = HTML.encode("utf-8")
+        data = HTML.replace(
+            "__REASON_METADATA_JSON__",
+            REASON_METADATA_JSON,
+        ).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
