@@ -268,6 +268,8 @@ def predict_page(model, encoded, page, roles, threshold, link_mode="row"):
             "text": region["text"],
             "bbox": region["bbox"],
             "labels": [role],
+            # Giữ role gốc trước khi các rule hậu xử lý có thể đổi thành OTHER.
+            "model_labels": [role],
             "scores": dict(zip(roles, scores, strict=True)),
         })
         if role == "OTHER":

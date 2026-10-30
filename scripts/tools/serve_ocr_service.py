@@ -1,10 +1,10 @@
 # Mục đích: cung cấp giao diện web đơn giản cho OCRService.
-# Chức năng: nhận PDF upload, chạy OCRService.process_pdf() và hiển thị từng phiếu.
-# Luồng xử lý: HTTP upload → OCRService → metadata/ảnh → giao diện HTML.
+# Chức năng: nhận PDF upload, chạy OCRService.process_pdf(), hiển thị và sửa role.
+# Luồng xử lý: HTTP upload → OCRService → metadata/ảnh → giao diện HTML/API.
 # Cấu hình/parameter: file JSON config, thư mục output, host và port HTTP.
 # Quan hệ: chỉ điều phối HTTP; không chứa logic OCR hoặc logic phân tách phiếu.
-# Input/output: nhận multipart PDF; trả JSON kết quả và phục vụ ảnh đã render.
-# Contract: kết quả hiển thị lấy từ OCRService.process_pdf().
+# Input/output: nhận multipart PDF/role JSON; trả JSON kết quả và phục vụ ảnh đã render.
+# Contract: kết quả hiển thị lấy từ OCRService.process_pdf(); role sửa được lưu vào result.json.
 
 import argparse
 from email import policy
@@ -22,6 +22,17 @@ from scripts.inference.role_change_metadata import ROLE_CHANGE_REASON_METADATA
 HOST = "127.0.0.1"
 PORT = 8003
 DEBUG_CACHE_DIRECTORY = "_debug_cache"
+EDITABLE_ROLES = (
+    "KEY",
+    "VALUE",
+    "HEADER",
+    "FIELD_TABLE",
+    "NOTE",
+    "PAGE_NUMBER",
+    "FORM_NUMBER",
+    "INLINE_KEY_VALUE",
+    "OTHER",
+)
 
 REASON_METADATA_JSON = json.dumps(
     {
@@ -30,6 +41,131 @@ REASON_METADATA_JSON = json.dumps(
     },
     ensure_ascii=False,
 ).replace("</", "<\\/")
+
+
+def write_json_atomically(path, payload):
+    """Ghi JSON qua file tạm để tránh file kết quả bị dở dang."""
+    temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    temporary_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary_path.replace(path)
+
+
+def restore_model_roles(page_result):
+    """Khôi phục role gốc của model nếu page có snapshot."""
+    regions = page_result.get("regions", [])
+    if not regions or not all(
+        isinstance(region.get("model_labels"), list)
+        and region["model_labels"]
+        for region in regions
+    ):
+        return False
+
+    for region in regions:
+        region["labels"] = list(region["model_labels"])
+    page_result["role_change_codes"] = {
+        region["id"]: [1]
+        for region in regions
+        if "OTHER" in region["model_labels"]
+    }
+    return True
+
+
+def update_result_role(result, document_id, physical_page, region_id, role):
+    """Đổi role một region trong page result."""
+    for document in result.get("documents", []):
+        if str(document.get("document_id")) != str(document_id):
+            continue
+        for page in document.get("pages", []):
+            if str(page.get("source_pdf_page_number")) != str(physical_page):
+                continue
+            page_result = page.get("result")
+            if not isinstance(page_result, dict):
+                raise ValueError("Page này không có kết quả page3 để sửa role.")
+            restore_model_roles(page_result)
+            manual_overrides = page_result.setdefault(
+                "manual_role_overrides",
+                {},
+            )
+            for override_region_id, override in manual_overrides.items():
+                requested_role = override.get(
+                    "requested_role",
+                    override.get("role"),
+                )
+                if requested_role in EDITABLE_ROLES:
+                    override_region = next(
+                        (
+                            item
+                            for item in page_result.get("regions", [])
+                            if item.get("id") == override_region_id
+                        ),
+                        None,
+                    )
+                    if override_region is not None:
+                        override_region["labels"] = [requested_role]
+            region = next(
+                (
+                    item
+                    for item in page_result.get("regions", [])
+                    if item.get("id") == region_id
+                ),
+                None,
+            )
+            if region is None:
+                raise ValueError(f"Không tìm thấy region: {region_id}")
+
+            region["labels"] = [role]
+            role_change_codes = page_result.get("role_change_codes", {})
+            if role != "OTHER":
+                role_change_codes.pop(region_id, None)
+            page_result["role_change_codes"] = role_change_codes
+            manual_overrides[region_id] = {
+                "requested_role": role,
+            }
+            return page_result
+    raise ValueError("Không tìm thấy document/page cần cập nhật.")
+
+
+def recompute_page_result(page_result, config):
+    """Tính lại link và filter cho đúng một page result."""
+    from scripts.training.page3_layout_model import row_links
+    from scr.page3.text_postprocessing import TextPostprocessing
+
+    # Bắt đầu lại từ role hiện tại, không dùng các link cũ của page.
+    page_result.pop("links_by_mode", None)
+    page_result["links"] = row_links(
+        page_result["regions"],
+        "KEY",
+        "VALUE",
+        "key_region_id",
+        "value_region_id",
+    )
+    TextPostprocessing(config).process_pages([page_result])
+
+    region_by_id = {
+        region["id"]: region
+        for region in page_result["regions"]
+    }
+    for link in page_result.get("links", []):
+        key_region = region_by_id.get(link.get("key_region_id"))
+        value_region = region_by_id.get(link.get("value_region_id"))
+        if key_region:
+            link["key_text"] = key_region.get("text", "")
+        if value_region:
+            link["value_text"] = value_region.get("text", "")
+
+    for region_id, override in page_result.get(
+        "manual_role_overrides",
+        {},
+    ).items():
+        region = region_by_id.get(region_id)
+        if region:
+            override["effective_role"] = (
+                region.get("labels") or ["OTHER"]
+            )[0]
+    return page_result
 
 
 HTML = r"""<!doctype html>
@@ -59,6 +195,7 @@ HTML = r"""<!doctype html>
         #linkLayer { height: 100%; left: 0; pointer-events: none; position: absolute; top: 0; width: 100%; }
         .region-box { border: 2px solid #64748b; cursor: pointer; overflow: visible; position: absolute; }
         .region-box:hover, .region-box.selected { box-shadow: 0 0 0 3px #facc15; z-index: 10; }
+        .other-mask { background: #fff; border: 2px solid #fff; pointer-events: none; position: absolute; z-index: 5; }
         .region-box.key { border-color: #2563eb; background: #2563eb2b; }
         .region-box.value { border-color: #16a34a; background: #16a34a2b; }
         .region-box.header { border-color: #ea580c; background: #ea580c2b; }
@@ -130,6 +267,20 @@ HTML = r"""<!doctype html>
         <label><input id="showBoxes" type="checkbox" checked> Bbox</label>
         <label><input id="showOther" type="checkbox"> OTHER</label>
         <label><input id="showLinks" type="checkbox" checked> Link</label>
+        <label for="roleSelect">Role bbox:</label>
+        <select id="roleSelect" disabled>
+            <option value="KEY">KEY</option>
+            <option value="VALUE">VALUE</option>
+            <option value="HEADER">HEADER</option>
+            <option value="FIELD_TABLE">FIELD_TABLE</option>
+            <option value="NOTE">NOTE</option>
+            <option value="PAGE_NUMBER">PAGE_NUMBER</option>
+            <option value="FORM_NUMBER">FORM_NUMBER</option>
+            <option value="INLINE_KEY_VALUE">INLINE_KEY_VALUE</option>
+            <option value="OTHER">OTHER</option>
+        </select>
+        <button id="saveRole" type="button" disabled>Lưu role</button>
+        <span id="roleEditStatus"></span>
     </div>
     <div class="layout">
         <section class="panel">
@@ -171,12 +322,17 @@ const roleChangeReasons = document.getElementById("roleChangeReasons");
 const showBoxes = document.getElementById("showBoxes");
 const showOther = document.getElementById("showOther");
 const showLinks = document.getElementById("showLinks");
+const roleSelect = document.getElementById("roleSelect");
+const saveRole = document.getElementById("saveRole");
+const roleEditStatus = document.getElementById("roleEditStatus");
 const reasonMetadata = __REASON_METADATA_JSON__;
 const regionMap = new Map();
 const regionBoxMap = new Map();
+const otherMaskMap = new Map();
 let result = null;
 let documentIndex = 0;
 let pageIndex = 0;
+let selectedRegionId = null;
 
 function clear(element) {
     element.replaceChildren();
@@ -210,6 +366,10 @@ function renderPage(index) {
     previousPage.disabled = pageIndex === 0;
     nextPage.disabled = pageIndex === formDocument.pages.length - 1;
     pageTitle.textContent = `${formDocument.document_id} · ${page.page_type}`;
+    selectedRegionId = null;
+    roleSelect.disabled = true;
+    saveRole.disabled = true;
+    roleEditStatus.textContent = "";
     const pageResult = page.result;
     if (pageResult?.image_width && pageResult?.image_height) {
         stage.style.aspectRatio = `${pageResult.image_width} / ${pageResult.image_height}`;
@@ -253,12 +413,19 @@ function selectRegion(region) {
     regionBoxMap.forEach((box) => box.classList.remove("selected"));
     const box = regionBoxMap.get(region.id);
     if (box) box.classList.add("selected");
+    selectedRegionId = region.id;
+    roleSelect.value = primaryLabel(region);
+    roleSelect.disabled = false;
+    saveRole.disabled = false;
+    roleEditStatus.textContent = `${region.id} · ${primaryLabel(region)}`;
 }
 
 function renderRegions(pageResult) {
     stage.querySelectorAll(".region-box").forEach((box) => box.remove());
+    stage.querySelectorAll(".other-mask").forEach((mask) => mask.remove());
     regionMap.clear();
     regionBoxMap.clear();
+    otherMaskMap.clear();
     if (!pageResult || !pageResult.regions?.length) {
         return;
     }
@@ -286,6 +453,16 @@ function renderRegions(pageResult) {
         box.title = `${region.id} · ${label}${scoreText} · ${region.text || ""}`;
         box.addEventListener("click", () => selectRegion(region));
         stage.appendChild(box);
+        if (label === "OTHER") {
+            const mask = document.createElement("div");
+            mask.className = "other-mask";
+            mask.style.left = percent(bbox[0], width);
+            mask.style.top = percent(bbox[1], height);
+            mask.style.width = percent(bbox[2] - bbox[0], width);
+            mask.style.height = percent(bbox[3] - bbox[1], height);
+            stage.appendChild(mask);
+            otherMaskMap.set(region.id, mask);
+        }
         regionMap.set(region.id, region);
         regionBoxMap.set(region.id, box);
     });
@@ -297,6 +474,11 @@ function updateBoxVisibility() {
         const isOther = box.classList.contains("other");
         box.style.display = showBoxes.checked
             && (showOther.checked || !isOther)
+            ? "block"
+            : "none";
+    });
+    otherMaskMap.forEach((mask) => {
+        mask.style.display = showBoxes.checked && !showOther.checked
             ? "block"
             : "none";
     });
@@ -457,6 +639,49 @@ showLinks.addEventListener("change", () => {
     const page = result?.documents?.[documentIndex]?.pages?.[pageIndex];
     drawLinks(page?.result);
 });
+saveRole.addEventListener("click", async () => {
+    const page = result?.documents?.[documentIndex]?.pages?.[pageIndex];
+    const region = page?.result?.regions?.find(
+        (item) => item.id === selectedRegionId,
+    );
+    if (!result?.job_id || !page || !region) return;
+
+    const newRole = roleSelect.value;
+    saveRole.disabled = true;
+    roleEditStatus.textContent = "Đang lưu role...";
+    try {
+        const response = await fetch("/api/update-role", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                job_id: result.job_id,
+                document_id: result.documents[documentIndex].document_id,
+                physical_page: page.source_pdf_page_number,
+                region_id: region.id,
+                role: newRole,
+            }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+            throw new Error(payload.error || "Không thể lưu role.");
+        }
+        page.result = payload.page_result;
+        renderRegions(page.result);
+        drawLinks(page.result);
+        clear(links);
+        renderLinks(page.result);
+        renderRoleChangeReasons(page.result);
+        const updatedRegion = page.result.regions.find(
+            (item) => item.id === selectedRegionId,
+        );
+        if (updatedRegion) selectRegion(updatedRegion);
+        statusText.textContent = `Đã lưu role ${payload.role} cho ${region.id} và tính lại page vào result.json.`;
+    } catch (error) {
+        roleEditStatus.textContent = error.message;
+    } finally {
+        saveRole.disabled = !selectedRegionId;
+    }
+});
 document.addEventListener("keydown", (event) => {
     if (event.target.matches("input, select, textarea, button")) return;
     if (event.key === "ArrowLeft" && pageIndex > 0) {
@@ -548,8 +773,12 @@ class OCRRequestHandler(SimpleHTTPRequestHandler):
         self.send_error(404)
 
     def do_POST(self):
-        """Lưu PDF upload và gọi OCRService.process_pdf()."""
-        if urlparse(self.path).path != "/api/process":
+        """Xử lý upload PDF hoặc cập nhật role trong result.json."""
+        request_path = urlparse(self.path).path
+        if request_path == "/api/update-role":
+            self._update_role()
+            return
+        if request_path != "/api/process":
             self.send_error(404)
             return
 
@@ -588,7 +817,80 @@ class OCRRequestHandler(SimpleHTTPRequestHandler):
         config["reuse_ocr_cache"] = reuse_cache
         process_result = OCRService(config).process_pdf(str(source_pdf))
         result = build_result(job_id, output_directory, process_result)
+        result["job_id"] = job_id
+        write_json_atomically(job_directory / "result.json", result)
         self._send_json(result)
+
+    def _update_role(self):
+        """Cập nhật role region trong result.json của một job."""
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(
+                self.rfile.read(content_length).decode("utf-8"),
+            )
+        except (UnicodeDecodeError, ValueError, TypeError):
+            self._send_json({"error": "Payload JSON không hợp lệ."}, 400)
+            return
+
+        job_id = str(payload.get("job_id", "")).strip()
+        document_id = str(payload.get("document_id", "")).strip()
+        physical_page = payload.get("physical_page")
+        region_id = str(payload.get("region_id", "")).strip()
+        role = payload.get("role")
+        if (
+            not job_id
+            or Path(job_id).name != job_id
+            or job_id in {".", ".."}
+            or not document_id
+            or physical_page is None
+            or not region_id
+            or role not in EDITABLE_ROLES
+        ):
+            self._send_json({"error": "Thông tin cập nhật role không hợp lệ."}, 400)
+            return
+
+        result_path = self.server.output_root / job_id / "result.json"
+        if not result_path.is_file():
+            self._send_json({"error": "Không tìm thấy result.json của job."}, 404)
+            return
+
+        try:
+            result = json.loads(result_path.read_text(encoding="utf-8"))
+            page_result = update_result_role(
+                result,
+                document_id,
+                physical_page,
+                region_id,
+                role,
+            )
+            page_result = recompute_page_result(
+                page_result,
+                self.server.ocr_config,
+            )
+            write_json_atomically(result_path, result)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            self._send_json({"error": str(error)}, 400)
+            return
+
+        self._send_json(
+            {
+                "ok": True,
+                "job_id": job_id,
+                "document_id": document_id,
+                "physical_page": physical_page,
+                "region_id": region_id,
+                "role": next(
+                    (
+                        region.get("labels", ["OTHER"])[0]
+                        for region in page_result.get("regions", [])
+                        if region.get("id") == region_id
+                    ),
+                    "OTHER",
+                ),
+                "requested_role": role,
+                "page_result": page_result,
+            },
+        )
 
     def translate_path(self, path):
         """Ánh xạ URL assets vào thư mục output của server."""
@@ -609,14 +911,23 @@ class OCRRequestHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_json(self, payload):
+    def _send_json(self, payload, status=200):
         """Trả JSON kết quả OCR."""
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (
+            BrokenPipeError,
+            ConnectionAbortedError,
+            ConnectionResetError,
+        ):
+            # Client có thể đóng request sau khi timeout hoặc chuyển page.
+            # Đây không phải lỗi xử lý OCR và không cần in traceback server.
+            self.close_connection = True
 
 
 def parse_arguments():
