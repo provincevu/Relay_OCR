@@ -21,6 +21,9 @@ else:
 OVERLAP_TOLERANCE = 10
 SAME_ROW_GAP = 30
 FIELD_TABLE_X_TOLERANCE = 0.04  # 4% chiều rộng page cho mỗi phía.
+CROSS_ROW_MAX_VERTICAL_GAP = 2.5
+CROSS_ROW_MIN_HORIZONTAL_OVERLAP = 0.2
+CROSS_ROW_MIN_SCORE_MARGIN = 0.1
 
 
 def value_is_right(key_region, value_region):
@@ -491,10 +494,175 @@ def repair_split_links(prediction):
         )
 
 
-def filter_unlinked_regions(prediction):
+def _horizontal_overlap_ratio(first, second):
+    """Tính overlap theo trục X trên bbox nhỏ hơn."""
+    first_box = first["bbox"]
+    second_box = second["bbox"]
+    overlap = max(
+        0,
+        min(first_box[2], second_box[2])
+        - max(first_box[0], second_box[0]),
+    )
+    first_width = max(first_box[2] - first_box[0], 1)
+    second_width = max(second_box[2] - second_box[0], 1)
+    return overlap / min(first_width, second_width)
+
+
+def _cross_row_candidate_score(
+    key_region,
+    value_region,
+    regions,
+    max_vertical_gap,
+    min_horizontal_overlap,
+):
+    """Tính score cho cặp orphan KEY/VALUE khác row."""
+    if not value_is_right(key_region, value_region):
+        return None
+    if _same_row(key_region, value_region):
+        return None
+
+    key_box = key_region["bbox"]
+    value_box = value_region["bbox"]
+    vertical_gap = max(
+        0,
+        max(key_box[1], value_box[1])
+        - min(key_box[3], value_box[3]),
+    )
+    max_height = max(
+        key_box[3] - key_box[1],
+        value_box[3] - value_box[1],
+        1,
+    )
+    if vertical_gap > max_height * max_vertical_gap:
+        return None
+
+    horizontal_overlap = _horizontal_overlap_ratio(
+        key_region,
+        value_region,
+    )
+    if horizontal_overlap < min_horizontal_overlap:
+        return None
+    if _has_layout_barrier(key_region, value_region, regions):
+        return None
+
+    vertical_score = max(
+        0,
+        1 - vertical_gap / (max_height * max_vertical_gap),
+    )
+    return horizontal_overlap * 0.7 + vertical_score * 0.3
+
+
+def _best_unambiguous_candidate(candidates, min_score_margin):
+    """Chọn candidate tốt nhất nếu không bị candidate khác cạnh tranh."""
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    if len(candidates) > 1 and (
+        candidates[0][0] - candidates[1][0] < min_score_margin
+    ):
+        return None
+    return candidates[0]
+
+
+def recover_cross_row_links(
+    prediction,
+    max_vertical_gap=CROSS_ROW_MAX_VERTICAL_GAP,
+    min_horizontal_overlap=CROSS_ROW_MIN_HORIZONTAL_OVERLAP,
+    min_score_margin=CROSS_ROW_MIN_SCORE_MARGIN,
+):
+    """Ghép orphan KEY/VALUE khác row khi hình học đủ rõ ràng."""
+    regions = prediction["regions"]
+    links = prediction.setdefault("links", [])
+    linked_key_ids = {
+        link["key_region_id"]
+        for link in links
+    }
+    linked_value_ids = {
+        link["value_region_id"]
+        for link in links
+    }
+    orphan_keys = [
+        region
+        for region in regions
+        if "KEY" in region.get("labels", [])
+        and region["id"] not in linked_key_ids
+    ]
+    orphan_values = [
+        region
+        for region in regions
+        if "VALUE" in region.get("labels", [])
+        and region["id"] not in linked_value_ids
+    ]
+    if not orphan_keys or not orphan_values:
+        return prediction
+
+    key_candidates = {region["id"]: [] for region in orphan_keys}
+    value_candidates = {region["id"]: [] for region in orphan_values}
+    for key_region in orphan_keys:
+        for value_region in orphan_values:
+            score = _cross_row_candidate_score(
+                key_region,
+                value_region,
+                regions,
+                max_vertical_gap,
+                min_horizontal_overlap,
+            )
+            if score is None:
+                continue
+            candidate = (
+                score,
+                key_region["id"],
+                value_region["id"],
+            )
+            key_candidates[key_region["id"]].append(candidate)
+            value_candidates[value_region["id"]].append(candidate)
+
+    best_by_key = {
+        key_id: _best_unambiguous_candidate(
+            candidates,
+            min_score_margin,
+        )
+        for key_id, candidates in key_candidates.items()
+        if candidates
+    }
+    best_by_value = {
+        value_id: _best_unambiguous_candidate(
+            candidates,
+            min_score_margin,
+        )
+        for value_id, candidates in value_candidates.items()
+        if candidates
+    }
+    for key_id, candidate in best_by_key.items():
+        if candidate is None:
+            continue
+        score, _, value_id = candidate
+        if best_by_value.get(value_id) != candidate:
+            continue
+        links.append({
+            "key_region_id": key_id,
+            "value_region_id": value_id,
+            "score": score,
+            "link_mode": "cross_row_fallback",
+        })
+    return prediction
+
+
+def filter_unlinked_regions(
+    prediction,
+    enable_cross_row_fallback=False,
+    max_vertical_gap=CROSS_ROW_MAX_VERTICAL_GAP,
+    min_horizontal_overlap=CROSS_ROW_MIN_HORIZONTAL_OVERLAP,
+    min_score_margin=CROSS_ROW_MIN_SCORE_MARGIN,
+):
     """Đổi KEY/VALUE không có link thành OTHER và giữ nguyên role khác."""
     role_change_codes = prediction.setdefault("role_change_codes", {})
     repair_split_links(prediction)
+    if enable_cross_row_fallback:
+        recover_cross_row_links(
+            prediction,
+            max_vertical_gap=max_vertical_gap,
+            min_horizontal_overlap=min_horizontal_overlap,
+            min_score_margin=min_score_margin,
+        )
     linked_key_ids = {
         link["key_region_id"]
         for link in prediction.get("links", [])
@@ -522,6 +690,10 @@ def filter_unlinked_regions(prediction):
 def filter_prediction_pages(
     pages,
     field_table_x_tolerance=FIELD_TABLE_X_TOLERANCE,
+    enable_cross_row_fallback=False,
+    max_vertical_gap=CROSS_ROW_MAX_VERTICAL_GAP,
+    min_horizontal_overlap=CROSS_ROW_MIN_HORIZONTAL_OVERLAP,
+    min_score_margin=CROSS_ROW_MIN_SCORE_MARGIN,
 ):
     """Lọc tuần tự các page và kế thừa vùng ngang FIELD_TABLE."""
     initialize_role_change_codes(pages)
@@ -556,7 +728,13 @@ def filter_prediction_pages(
             page["role_change_codes"],
         )
         filter_prediction_links(page)
-        filter_unlinked_regions(page)
+        filter_unlinked_regions(
+            page,
+            enable_cross_row_fallback=enable_cross_row_fallback,
+            max_vertical_gap=max_vertical_gap,
+            min_horizontal_overlap=min_horizontal_overlap,
+            min_score_margin=min_score_margin,
+        )
         current_field_table_x_ranges = field_table_x_ranges(
             page["regions"],
             page["image_width"],

@@ -9,6 +9,10 @@
 from pathlib import Path
 
 from scripts.inference.page_n_prediction_filter import (
+    CROSS_ROW_MAX_VERTICAL_GAP,
+    CROSS_ROW_MIN_HORIZONTAL_OVERLAP,
+    CROSS_ROW_MIN_SCORE_MARGIN,
+    FIELD_TABLE_X_TOLERANCE,
     filter_prediction_pages,
     filter_unlinked_regions,
 )
@@ -21,18 +25,44 @@ class TextPostprocessing:
     def __init__(self, config):
         self.field_table_x_tolerance = config.get(
             "page3_field_table_x_tolerance",
-            0.04,
+            FIELD_TABLE_X_TOLERANCE,
+        )
+        self.enable_cross_row_fallback = config.get(
+            "page3_enable_cross_row_fallback",
+            False,
+        )
+        self.cross_row_max_vertical_gap = config.get(
+            "page3_cross_row_max_vertical_gap",
+            CROSS_ROW_MAX_VERTICAL_GAP,
+        )
+        self.cross_row_min_horizontal_overlap = config.get(
+            "page3_cross_row_min_horizontal_overlap",
+            CROSS_ROW_MIN_HORIZONTAL_OVERLAP,
+        )
+        self.cross_row_min_score_margin = config.get(
+            "page3_cross_row_min_score_margin",
+            CROSS_ROW_MIN_SCORE_MARGIN,
         )
 
     def process_page(self, prediction):
         """Hậu xử lý một prediction page."""
-        return filter_unlinked_regions(prediction)
+        return filter_unlinked_regions(
+            prediction,
+            enable_cross_row_fallback=self.enable_cross_row_fallback,
+            max_vertical_gap=self.cross_row_max_vertical_gap,
+            min_horizontal_overlap=self.cross_row_min_horizontal_overlap,
+            min_score_margin=self.cross_row_min_score_margin,
+        )
 
     def process_pages(self, predictions):
         """Hậu xử lý liên tục các prediction theo thứ tự page."""
         filter_prediction_pages(
             predictions,
             self.field_table_x_tolerance,
+            self.enable_cross_row_fallback,
+            self.cross_row_max_vertical_gap,
+            self.cross_row_min_horizontal_overlap,
+            self.cross_row_min_score_margin,
         )
         return predictions
 

@@ -58,8 +58,8 @@ class Page3Inference:
         }
         for region in prediction["regions"]:
             region["ocr_score"] = ocr_scores[region["id"]]
-        self._add_link_texts(prediction)
         self.text_postprocessing.process_page(prediction)
+        self._add_link_texts(prediction)
         prediction.update(
             {
                 "pdf_name": page_record.get("pdf_name", page_record.get("pdfName")),
@@ -88,6 +88,8 @@ class Page3Inference:
         """Suy luận tuần tự và hậu xử lý liên tục nhiều page."""
         predictions = [self.infer(page_record) for page_record in page_records]
         self.text_postprocessing.process_pages(predictions)
+        for prediction in predictions:
+            self._add_link_texts(prediction)
         return predictions
 
     def _load_model(self, checkpoint_directory):
