@@ -9,10 +9,8 @@
 import argparse
 from email import policy
 from email.parser import BytesParser
-import hashlib
 import json
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-import shutil
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
@@ -23,7 +21,6 @@ from scripts.inference.role_change_metadata import ROLE_CHANGE_REASON_METADATA
 
 HOST = "127.0.0.1"
 PORT = 8003
-CACHE_SCHEMA_VERSION = 1
 DEBUG_CACHE_DIRECTORY = "_debug_cache"
 
 REASON_METADATA_JSON = json.dumps(
@@ -33,54 +30,6 @@ REASON_METADATA_JSON = json.dumps(
     },
     ensure_ascii=False,
 ).replace("</", "<\\/")
-
-
-def build_cache_key(pdf_bytes, config):
-    """Tạo cache key theo nội dung PDF và cấu hình OCR hiện tại."""
-    cache_config = {
-        key: value
-        for key, value in config.items()
-        if key != "input_loader_output"
-    }
-    config_bytes = json.dumps(
-        {
-            "schema_version": CACHE_SCHEMA_VERSION,
-            "config": cache_config,
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        default=str,
-    ).encode("utf-8")
-    digest = hashlib.sha256()
-    digest.update(pdf_bytes)
-    digest.update(b"\0")
-    digest.update(config_bytes)
-    return digest.hexdigest()
-
-
-def load_debug_cache(cache_directory, output_directory):
-    """Nạp kết quả và ảnh từ cache nếu cache đầy đủ và hợp lệ."""
-    result_path = cache_directory / "process_result.json"
-    cached_output = cache_directory / "splitted_pdf"
-    if not result_path.is_file() or not cached_output.is_dir():
-        return None
-    if output_directory.exists():
-        shutil.rmtree(output_directory)
-    shutil.copytree(cached_output, output_directory)
-    return json.loads(result_path.read_text(encoding="utf-8"))
-
-
-def save_debug_cache(cache_directory, output_directory, process_result):
-    """Lưu kết quả và ảnh đã render để phục vụ debug lần chạy sau."""
-    cache_directory.mkdir(parents=True, exist_ok=True)
-    cached_output = cache_directory / "splitted_pdf"
-    if cached_output.exists():
-        shutil.rmtree(cached_output)
-    shutil.copytree(output_directory, cached_output)
-    (cache_directory / "process_result.json").write_text(
-        json.dumps(process_result, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
 
 
 HTML = r"""<!doctype html>
@@ -166,7 +115,7 @@ HTML = r"""<!doctype html>
     <form class="toolbar" id="uploadForm">
         <input id="pdfInput" name="pdf" type="file" accept="application/pdf" required>
         <button type="submit">Xử lý PDF</button>
-        <label><input id="reuseCache" name="reuse_cache" type="checkbox"> Dùng cache debug</label>
+        <label><input id="reuseCache" name="reuse_cache" type="checkbox"> Dùng cache OCR trung gian (debug)</label>
         <button id="previousDocument" type="button" disabled>← Phiếu trước</button>
         <button id="nextDocument" type="button" disabled>Phiếu sau →</button>
         <span id="documentPosition"></span>
@@ -474,8 +423,8 @@ form.addEventListener("submit", async (event) => {
     }
     documentIndex = 0;
     const cacheStatus = result._debug_cache?.hit
-        ? " Đã dùng cache debug."
-        : " Đã lưu cache debug cho lần sau.";
+        ? " Đã dùng cache OCR trung gian."
+        : " Đã lưu cache OCR trung gian cho lần sau.";
     statusText.textContent = `Đã xử lý ${result.documents.length} phiếu.${cacheStatus}`;
     renderDocument();
 });
@@ -572,6 +521,7 @@ def build_result(job_id, output_directory, process_result):
     return {
         "source_pdf": process_result["source_pdf"],
         "documents": documents,
+        "_debug_cache": process_result.get("_debug_cache"),
     }
 
 
@@ -630,30 +580,14 @@ class OCRRequestHandler(SimpleHTTPRequestHandler):
         output_directory = job_directory / "splitted_pdf"
         config = dict(self.server.ocr_config)
         config["input_loader_output"] = str(output_directory)
-        cache_key = build_cache_key(pdf_bytes, config)
-        cache_directory = (
+        config["input_loader_ocr_cache"] = str(
             self.server.output_root
             / DEBUG_CACHE_DIRECTORY
-            / cache_key
+            / "ocr_evidence"
         )
-        process_result = (
-            load_debug_cache(cache_directory, output_directory)
-            if reuse_cache
-            else None
-        )
-        cache_hit = process_result is not None
-        if process_result is None:
-            process_result = OCRService(config).process_pdf(str(source_pdf))
-            save_debug_cache(
-                cache_directory,
-                output_directory,
-                process_result,
-            )
+        config["reuse_ocr_cache"] = reuse_cache
+        process_result = OCRService(config).process_pdf(str(source_pdf))
         result = build_result(job_id, output_directory, process_result)
-        result["_debug_cache"] = {
-            "hit": cache_hit,
-            "key": cache_key,
-        }
         self._send_json(result)
 
     def translate_path(self, path):

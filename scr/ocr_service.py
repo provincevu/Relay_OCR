@@ -115,6 +115,12 @@ class OCRService:
         return {
             "source_pdf": input_metadata["source_pdf"],
             "documents": documents,
+            "_debug_cache": {
+                "kind": "ocr_evidence",
+                "hit": input_loader.last_ocr_cache_hit,
+                "key": input_loader.last_ocr_cache_key,
+                "reused": input_loader.reuse_ocr_cache,
+            },
         }
 
     def _read_document_metadata(self, output_directory, document_id):

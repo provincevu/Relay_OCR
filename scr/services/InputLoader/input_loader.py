@@ -6,6 +6,7 @@
 # Input/output: nhận một đường dẫn PDF; ghi thư mục phiếu và input_metadata.json.
 # Contract: mỗi ảnh có image_path, source_pdf_page_number và document_page_number; chỉ số ảnh bắt đầu từ 001.
 
+import hashlib
 import json
 import re
 import shutil
@@ -18,6 +19,9 @@ import cv2
 from pypdf import PdfReader
 
 from scr.services.PageEvidence import PageEvidenceService
+
+
+OCR_EVIDENCE_CACHE_SCHEMA = 1
 
 
 class InputLoader:
@@ -33,6 +37,15 @@ class InputLoader:
         )
         self.render_dpi = config.get("input_loader_render_dpi", 200)
         self.renderer = config.get("input_loader_renderer")
+        cache_directory = config.get("input_loader_ocr_cache")
+        self.ocr_cache_directory = (
+            Path(cache_directory).resolve()
+            if cache_directory
+            else None
+        )
+        self.reuse_ocr_cache = bool(config.get("reuse_ocr_cache", False))
+        self.last_ocr_cache_hit = False
+        self.last_ocr_cache_key = None
         self.page_evidence = page_evidence or PageEvidenceService(config)
 
     def load(self, pdf_path):
@@ -43,26 +56,66 @@ class InputLoader:
             raise ValueError(f"PDF không có page: {source_pdf}")
 
         self.output_directory.mkdir(parents=True, exist_ok=True)
-        renderer = self._find_renderer()
+        source_sha256 = self._sha256_file(source_pdf)
+        fingerprint = self._ocr_cache_fingerprint()
+        cache_key = self._build_ocr_cache_key(
+            source_sha256,
+            page_count,
+            fingerprint,
+        )
+        self.last_ocr_cache_key = cache_key
+        cache_directory = (
+            self.ocr_cache_directory / cache_key
+            if self.ocr_cache_directory
+            else None
+        )
+        pages = None
+        if self.reuse_ocr_cache and cache_directory:
+            pages = self._load_ocr_cache(
+                cache_directory,
+                source_sha256,
+                page_count,
+                fingerprint,
+            )
+            self.last_ocr_cache_hit = pages is not None
 
         with tempfile.TemporaryDirectory() as temporary_directory:
-            temporary_directory = Path(temporary_directory)
-            pages = []
-            for source_page_number in range(1, page_count + 1):
-                image_path = self._render_page(
-                    renderer,
-                    source_pdf,
-                    source_page_number,
-                    temporary_directory,
-                )
-                ocr_regions = self._recognize_page(image_path)
-                pages.append(
-                    self._build_page_evidence(
+            if pages is None:
+                renderer = self._find_renderer()
+                temporary_directory = Path(temporary_directory)
+                pages = []
+                for source_page_number in range(1, page_count + 1):
+                    image_path = self._render_page(
+                        renderer,
+                        source_pdf,
                         source_page_number,
-                        image_path,
-                        ocr_regions,
-                    ),
-                )
+                        temporary_directory,
+                    )
+                    ocr_regions = self._recognize_page(image_path)
+                    pages.append(
+                        self._build_page_evidence(
+                            source_page_number,
+                            image_path,
+                            ocr_regions,
+                        ),
+                    )
+
+                if cache_directory:
+                    self._save_ocr_cache(
+                        cache_directory,
+                        source_sha256,
+                        page_count,
+                        fingerprint,
+                        pages,
+                    )
+                    cached_pages = self._load_ocr_cache(
+                        cache_directory,
+                        source_sha256,
+                        page_count,
+                        fingerprint,
+                    )
+                    if cached_pages is not None:
+                        pages = cached_pages
 
             documents = self._split_pages(pages)
             document_metadata = []
@@ -91,6 +144,172 @@ class InputLoader:
             encoding="utf-8",
         )
         return metadata
+
+    def _sha256_file(self, path):
+        """Tính hash theo nội dung PDF để nhận diện đúng source document."""
+        digest = hashlib.sha256()
+        with path.open("rb") as file_handle:
+            for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _ocr_cache_fingerprint(self):
+        """Chỉ lấy các cấu hình ảnh hưởng tới detection/recognition."""
+        keys_with_defaults = {
+            "render_dpi": self.render_dpi,
+            "device": self.config.get("device", "cpu"),
+            "engine": self.config.get("engine", "paddle_static"),
+            "cpu_threads": self.config.get("cpu_threads", 2),
+            "enable_mkldnn": self.config.get("enable_mkldnn", False),
+            "use_doc_orientation_classify": self.config.get(
+                "use_doc_orientation_classify",
+                True,
+            ),
+            "doc_orientation_model_name": self.config.get(
+                "doc_orientation_model_name",
+                "PP-LCNet_x1_0_doc_ori",
+            ),
+            "use_doc_unwarping": self.config.get(
+                "use_doc_unwarping",
+                False,
+            ),
+            "doc_unwarping_model_name": self.config.get(
+                "doc_unwarping_model_name",
+                "UVDoc",
+            ),
+            "use_textline_orientation": self.config.get(
+                "use_textline_orientation",
+                False,
+            ),
+            "textline_orientation_model_name": self.config.get(
+                "textline_orientation_model_name",
+                "PP-LCNet_x0_25_textline_ori",
+            ),
+            "detector_model": self.config.get(
+                "model_name",
+                "PP-OCRv6_medium_det",
+            ),
+            "limit_side_len": self.config.get("limit_side_len", 1600),
+            "limit_type": self.config.get("limit_type", "max"),
+            "thresh": self.config.get("thresh", 0.3),
+            "box_thresh": self.config.get("box_thresh", 0.6),
+            "unclip_ratio": self.config.get("unclip_ratio", 2.0),
+            "recognition_model": self.config.get(
+                "recognition_model",
+                "vgg_transformer",
+            ),
+            "recognition_device": self.config.get(
+                "recognition_device",
+                "cpu",
+            ),
+        }
+        return keys_with_defaults
+
+    def _build_ocr_cache_key(self, source_sha256, page_count, fingerprint):
+        """Tạo key ổn định cho cache OCR trung gian, không phụ thuộc page3."""
+        cache_identity = {
+            "cache_schema": OCR_EVIDENCE_CACHE_SCHEMA,
+            "source_sha256": source_sha256,
+            "page_count": page_count,
+            "fingerprint": fingerprint,
+        }
+        payload = json.dumps(
+            cache_identity,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _load_ocr_cache(
+        self,
+        cache_directory,
+        source_sha256,
+        page_count,
+        fingerprint,
+    ):
+        """Đọc cache OCR nếu manifest và toàn bộ ảnh trung gian còn hợp lệ."""
+        manifest_path = cache_directory / "manifest.json"
+        if not manifest_path.is_file():
+            return None
+
+        try:
+            manifest = json.loads(
+                manifest_path.read_text(encoding="utf-8"),
+            )
+        except (OSError, ValueError):
+            return None
+
+        if (
+            manifest.get("cache_schema") != OCR_EVIDENCE_CACHE_SCHEMA
+            or manifest.get("source_sha256") != source_sha256
+            or manifest.get("page_count") != page_count
+            or manifest.get("fingerprint") != fingerprint
+        ):
+            return None
+
+        cached_pages = []
+        manifest_pages = manifest.get("pages")
+        if not isinstance(manifest_pages, list) or len(manifest_pages) != page_count:
+            return None
+
+        for page in manifest_pages:
+            image_name = page.get("image_name")
+            image_path = cache_directory / "pages" / str(image_name)
+            if not image_name or not image_path.is_file():
+                return None
+            cached_pages.append(
+                {
+                    "source_page_number": page["source_page_number"],
+                    "image_path": str(image_path),
+                    "current_page": page.get("current_page"),
+                    "total_pages": page.get("total_pages"),
+                    "is_form_start": page.get("is_form_start", False),
+                    "ocr_regions": page.get("ocr_regions", []),
+                },
+            )
+        return cached_pages
+
+    def _save_ocr_cache(
+        self,
+        cache_directory,
+        source_sha256,
+        page_count,
+        fingerprint,
+        pages,
+    ):
+        """Lưu ảnh render và OCR evidence; manifest được ghi sau cùng."""
+        pages_directory = cache_directory / "pages"
+        pages_directory.mkdir(parents=True, exist_ok=True)
+        manifest_pages = []
+        for page in pages:
+            image_name = f"source_page_{page['source_page_number']:04d}.png"
+            shutil.copy2(
+                page["image_path"],
+                pages_directory / image_name,
+            )
+            manifest_pages.append(
+                {
+                    "source_page_number": page["source_page_number"],
+                    "current_page": page["current_page"],
+                    "total_pages": page["total_pages"],
+                    "is_form_start": page["is_form_start"],
+                    "ocr_regions": page["ocr_regions"],
+                    "image_name": image_name,
+                },
+            )
+
+        manifest = {
+            "cache_schema": OCR_EVIDENCE_CACHE_SCHEMA,
+            "source_sha256": source_sha256,
+            "page_count": page_count,
+            "fingerprint": fingerprint,
+            "pages": manifest_pages,
+        }
+        (cache_directory / "manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     def _find_renderer(self):
         """Tìm Ghostscript dùng để render page PDF."""
