@@ -45,8 +45,8 @@ chỉ xuất ảnh khi ở chế độ debug
 
 ## API OCR local (Phase 1)
 
-API nhận PDF, lưu theo job và đưa vào Redis Queue. Trong Phase 1, worker OCR
-chưa được nối; job sẽ ở trạng thái `queued` cho đến khi hoàn thành Phase 2.
+API nhận PDF, lưu theo job và đưa vào Redis Queue. Worker ở Phase 2 chạy OCR
+tuần tự bằng pipeline hiện có rồi ghi JSON kết quả vào thư mục của job.
 
 ### Khởi động Redis
 
@@ -61,18 +61,30 @@ docker compose exec redis redis-cli ping
 Lệnh cuối phải trả `PONG`. Redis chỉ publish cổng trên `127.0.0.1` và dùng
 named volume `relay_ocr_redis_data` để giữ dữ liệu.
 
-### Cài dependencies và chạy API
+### Cài dependencies và chạy API/worker
 
 Trong PowerShell:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-$env:OCR_API_TOKEN = "replace-this-with-a-local-secret"
+$env:OCR_API_TOKEN = "set-the-same-secret-in-the-client-terminal"
 .\.venv\Scripts\python.exe -m uvicorn scr.api.app:app --host 127.0.0.1 --port 8010
 ```
 
 Token chỉ có hiệu lực trong cửa sổ PowerShell hiện tại. Không commit token thật
 vào repo. API mặc định chỉ nghe trên loopback.
+
+Mở PowerShell thứ hai tại root repo để chạy worker. API và worker phải cùng
+`REDIS_URL`, `OCR_JOB_ROOT`, `OCR_CONFIG_PATH` nếu bạn đã đổi các giá trị mặc
+định:
+
+```powershell
+.\.venv\Scripts\python.exe -m scr.api.worker
+```
+
+Worker dùng RQ `SimpleWorker` cùng `TimerDeathPenalty` trên Windows và xử lý
+mỗi lần một job. Model OCR
+được nạp trong worker khi job đầu tiên bắt đầu, sau đó dùng lại cho các job sau.
 
 ### Gọi API
 
@@ -81,16 +93,17 @@ Mở PowerShell thứ hai tại repo, đặt cùng token rồi gửi PDF:
 ```powershell
 $env:OCR_API_TOKEN = "replace-this-with-a-local-secret"
 $headers = @{ Authorization = "Bearer $env:OCR_API_TOKEN" }
-$job = Invoke-RestMethod -Method Post `
-  -Uri http://127.0.0.1:8010/api/v1/jobs `
-  -Headers $headers `
-  -Form @{ file = Get-Item "C:\path\to\sample.pdf" }
+$job = curl.exe -sS -X POST `
+  http://127.0.0.1:8010/api/v1/jobs `
+  -H "Authorization: Bearer $env:OCR_API_TOKEN" `
+  -F "file=@C:\path\to\sample.pdf;type=application/pdf" | ConvertFrom-Json
 $job
-Invoke-RestMethod -Uri "http://127.0.0.1:8010/api/v1/jobs/$($job.job_id)" -Headers $headers
+Invoke-RestMethod "http://127.0.0.1:8010/api/v1/jobs/$($job.job_id)" -Headers $headers
+Invoke-RestMethod "http://127.0.0.1:8010/api/v1/jobs/$($job.job_id)/result" -Headers $headers
 ```
 
-API trả `202 Accepted` cùng `job_id`. Polling và lấy kết quả OCR hoạt động sau
-khi hoàn thành Phase 2. Health checks không cần token:
+API trả `202 Accepted` cùng `job_id`. Khi worker hoàn tất, polling trả trạng thái
+`succeeded` và endpoint result trả JSON OCR. Health checks không cần token:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8010/health/live

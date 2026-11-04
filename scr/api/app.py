@@ -191,6 +191,7 @@ async def submit_job(file: UploadFile):
             process_ocr_job,
             job_id,
             str(source_pdf),
+            original_filename,
             job_id=job_id,
             job_timeout=settings.job_timeout_seconds,
             result_ttl=JOB_RETENTION_SECONDS,

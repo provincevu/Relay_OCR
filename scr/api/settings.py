@@ -24,6 +24,7 @@ class Settings:
     queue_name: str
     api_token: str
     job_root: Path
+    config_path: Path
     max_upload_mb: int
     max_pdf_pages: int
     job_retention_days: int
@@ -39,6 +40,9 @@ class Settings:
             api_token=os.getenv("OCR_API_TOKEN", "").strip(),
             job_root=Path(
                 os.getenv("OCR_JOB_ROOT", "output/ocr_api/jobs"),
+            ).resolve(),
+            config_path=Path(
+                os.getenv("OCR_CONFIG_PATH", "config/ocr.json"),
             ).resolve(),
             max_upload_mb=_positive_int("MAX_UPLOAD_MB", 100),
             max_pdf_pages=_positive_int("MAX_PDF_PAGES", 300),

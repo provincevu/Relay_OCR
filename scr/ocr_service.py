@@ -31,6 +31,7 @@ class OCRService:
             self.detector,
             self.recognitor,
         )
+        self._page3_inference = None
 
     # Phát hiện các vùng text trên ảnh đã tiền xử lý.
     def detect_text(self, image):
@@ -50,11 +51,15 @@ class OCRService:
         image = self.image_preprocessing.preprocess(image_path)
         return self.table_1_analysis.analyze(image)
 
-    def process_pdf(self, pdf_path):
+    def process_pdf(self, pdf_path, output_directory=None):
         """Xử lý một PDF nhiều phiếu và trả kết quả theo từng phiếu."""
         from .services.InputLoader import InputLoader
 
         input_loader_config = dict(self.config)
+        if output_directory is not None:
+            input_loader_config["input_loader_output"] = str(
+                output_directory,
+            )
         input_loader_config.setdefault(
             "input_loader_render_dpi",
             INPUT_LOADER_RENDER_DPI,
@@ -64,7 +69,6 @@ class OCRService:
             self.page_evidence,
         )
         input_metadata = input_loader.load(pdf_path)
-        page3_inference = None
         documents = []
 
         for document in input_metadata["documents"]:
@@ -92,11 +96,11 @@ class OCRService:
 
             page3_result = []
             if page3_records:
-                if page3_inference is None:
+                if self._page3_inference is None:
                     from .page3 import Page3Inference
 
-                    page3_inference = Page3Inference(self.config)
-                page3_result = page3_inference.infer_pages(page3_records)
+                    self._page3_inference = Page3Inference(self.config)
+                page3_result = self._page3_inference.infer_pages(page3_records)
 
             documents.append(
                 {
