@@ -8,7 +8,7 @@
   "page3_cross_row_min_horizontal_overlap": 0.2,
   "page3_cross_row_min_score_margin": 0.1,
   "recognition_model": "vgg_transformer",
-  "page3_checkpoint": "output/checkpoints/page3plus_full_finetune_2",
+  "page3_checkpoint": "checkpoints/page3_model",
   "table_01_fields_path": "./config/table_01_fields.json",
   "input_loader_render_dpi": 400
 }

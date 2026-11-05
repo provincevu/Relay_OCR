@@ -54,3 +54,6 @@ use.txt
 
 #script AI
 create_table_01_ground_truth.py
+
+# checkpoint
+checkpoints/

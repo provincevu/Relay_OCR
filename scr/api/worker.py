@@ -1,4 +1,5 @@
-"""Windows-compatible RQ worker entrypoint for Relay OCR."""
+
+"""Redis Queue worker cho hệ thống OCR"""
 
 import os
 from pathlib import Path
@@ -9,32 +10,27 @@ from rq.timeouts import TimerDeathPenalty
 
 from .settings import settings
 
-
-class WindowsSimpleWorker(SimpleWorker):
-    """Use a timeout mechanism supported by Windows."""
-
+# khởi tạo worker cho hệ thống OCR, sử dụng Redis để quản lý queue và các job OCR
+class WindowsWorker(SimpleWorker):
     death_penalty_class = TimerDeathPenalty
 
 
 def main():
-    """Run one sequential SimpleWorker for the local OCR queue."""
-    repository_root = Path(__file__).resolve().parents[2]
-    os.chdir(repository_root)
+    # đặt thư mục làm việc hiện tại là thư mục gốc của dự án, để tránh lỗi khi chạy worker từ các vị trí khác nhau
+    os.chdir(Path(__file__).resolve().parents[2])
 
-    connection = Redis.from_url(settings.redis_url)
-    connection.ping()
-    queue = Queue(settings.queue_name, connection=connection)
-    worker = WindowsSimpleWorker(
-        [queue],
-        connection=connection,
-        name=f"relay-ocr-{os.getpid()}",
-    )
-    print(
-        f"RQ WindowsSimpleWorker listening on queue '{settings.queue_name}' "
-        f"at {settings.redis_url}",
-        flush=True,
-    )
-    worker.work(with_scheduler=False)
+    # Connect tới Redis
+    redis = Redis.from_url(settings.redis_url)
+    redis.ping()
+
+    # tạo queue và worker
+    queue = Queue(settings.queue_name, connection=redis)
+    worker = WindowsWorker([queue], connection=redis)
+
+    print(f"worker đang lắng nghe queue {settings.queue_name} ...", flush=True)
+
+    # Start worker
+    worker.work()
 
 
 if __name__ == "__main__":

@@ -1,323 +1,179 @@
-"""Authenticated local API for submitting and polling OCR jobs."""
 
-import asyncio
+"""API cục bộ để gửi và theo dõi các công việc OCR."""
+
 import hmac
 import json
-import logging
 import shutil
-from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import (
-    Depends,
-    FastAPI,
-    Header,
-    HTTPException,
-    Request,
-    UploadFile,
-    status,
-)
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, UploadFile, Header, HTTPException, Depends
 from pypdf import PdfReader
 from redis import Redis
-from redis.exceptions import RedisError
 from rq import Queue
-from rq.exceptions import NoSuchJobError
 from rq.job import Job
+from rq.exceptions import NoSuchJobError
 
 from .settings import settings
-from .cleanup import cleanup_expired_job_directories
 from .tasks import process_ocr_job
 
 
-logger = logging.getLogger(__name__)
-CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+# Redis và RQ
+redis = Redis.from_url(settings.redis_url)
+queue = Queue(settings.queue_name, connection=redis)
+
+app = FastAPI(title="Relay OCR API")
 
 
-async def _retention_cleanup_loop():
-    while True:
-        try:
-            removed = await asyncio.to_thread(
-                cleanup_expired_job_directories,
-                settings.job_root,
-                redis_connection,
-                settings.job_retention_days,
-            )
-            if removed:
-                logger.info("Retention cleanup removed %d OCR job directories", len(removed))
-        except Exception:
-            logger.exception("OCR job retention cleanup failed; it will retry later")
-        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
-
-
-@asynccontextmanager
-async def lifespan(_app):
-    cleanup_task = asyncio.create_task(_retention_cleanup_loop())
-    try:
-        yield
-    finally:
-        cleanup_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await cleanup_task
-
-
-app = FastAPI(
-    title="Relay OCR Local API",
-    version="1.0.0",
-    description="Local asynchronous PDF OCR API backed by Redis Queue.",
-    lifespan=lifespan,
-)
-
-redis_connection = Redis.from_url(settings.redis_url)
-ocr_queue = Queue(settings.queue_name, connection=redis_connection)
-JOB_RETENTION_SECONDS = settings.job_retention_days * 24 * 60 * 60
-MAX_UPLOAD_BYTES = settings.max_upload_mb * 1024 * 1024
-UPLOAD_CHUNK_BYTES = 1024 * 1024
-MULTIPART_OVERHEAD_BYTES = 64 * 1024
-
-
-@app.middleware("http")
-async def reject_oversized_upload(request: Request, call_next):
-    if request.method == "POST" and request.url.path == "/api/v1/jobs":
-        content_length = request.headers.get("content-length")
-        if content_length:
-            try:
-                request_bytes = int(content_length)
-            except ValueError:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"detail": "Invalid request content length."},
-                )
-            if request_bytes > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES:
-                return JSONResponse(
-                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                    content={
-                        "detail": (
-                            f"PDF exceeds the {settings.max_upload_mb} MB upload limit."
-                        ),
-                    },
-                )
-    return await call_next(request)
-
-
-def require_api_token(authorization: str | None = Header(default=None)):
-    if not settings.api_token:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="OCR_API_TOKEN is not configured.",
-        )
+# Xác thực
+def authenticate(authorization: str = Header(default="")):
     expected = f"Bearer {settings.api_token}"
-    if not authorization or not hmac.compare_digest(authorization, expected):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing bearer token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+
+    if not settings.api_token or not hmac.compare_digest(
+        authorization, expected
+    ):
+        raise HTTPException(status_code=401, detail="Không xác thực được. Hãy cung cấp token hợp lệ trong header Authorization.")
 
 
-def _job_or_404(job_id):
+# Lấy job từ Redis, nếu không tìm thấy thì trả về 404
+def get_job(job_id):
     try:
-        return Job.fetch(job_id, connection=redis_connection)
-    except NoSuchJobError as error:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job not found or expired.",
-        ) from error
-    except RedisError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis is unavailable.",
-        ) from error
+        return Job.fetch(job_id, connection=redis)
+    except NoSuchJobError:
+        raise HTTPException(status_code=404, detail="Không tìm thấy job với ID đã cho. Hãy kiểm tra lại ID hoặc xác nhận rằng job đã được gửi thành công.")
 
 
-def _normalized_job_status(job):
-    raw_status = job.get_status(refresh=True)
-    value = getattr(raw_status, "value", raw_status)
-    value = str(value).lower()
-    if value in {"finished", "successful"}:
-        return "succeeded"
-    if value in {"started", "busy"}:
-        return "running"
-    if value in {"failed", "stopped"}:
-        return "failed"
-    if value in {"queued", "deferred", "scheduled", "ready_to_enqueue"}:
-        return "queued"
-    return "failed"
+# Kiểm tra trạng thái
+@app.get("/health")
+def health():
+    redis.ping()
+    return {"status": "healthy"}
 
 
-@app.get("/health/live")
-def live():
-    return {"status": "live"}
-
-
-@app.get("/health/ready")
-def ready():
-    try:
-        redis_connection.ping()
-    except RedisError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis is unavailable.",
-        ) from error
-    return {"status": "ready", "queue": settings.queue_name}
-
-
-@app.post(
-    "/api/v1/jobs",
-    status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_api_token)],
-)
-async def submit_job(file: UploadFile):
+# Gửi PDF
+@app.post("/api/v1/jobs", status_code=202)
+async def submit_job(file: UploadFile, _: None = Depends(authenticate)):
     job_id = uuid4().hex
-    job_directory = settings.job_root / job_id
-    temporary_pdf = job_directory / "source.upload"
-    source_pdf = job_directory / "source.pdf"
-    job_directory.mkdir(parents=True, exist_ok=False)
 
-    total_bytes = 0
-    first_chunk = b""
+    # tạo thư mục job và lưu tệp PDF đã tải lên
+    settings.job_root.mkdir(parents=True, exist_ok=True)
+    job_directory = settings.job_root / job_id
+    job_directory.mkdir()
+
+    source_pdf = job_directory / "source.pdf"
+
     try:
-        with temporary_pdf.open("wb") as output_file:
-            while chunk := await file.read(UPLOAD_CHUNK_BYTES):
+        # Lưu tệp PDF đã tải lên
+        total_size = 0
+        first_chunk = b""
+
+        # kiểm tra xem tệp có phải là PDF hợp lệ hay không bằng cách đọc 8 byte đầu tiên (file signature (magic bytes) - file PDF hợp lệ bắt đầu bằng %PDF-)
+        with source_pdf.open("wb") as output:
+            while chunk := await file.read(1024 * 1024):
                 if not first_chunk:
                     first_chunk = chunk[:8]
-                total_bytes += len(chunk)
-                if total_bytes > MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"PDF exceeds the {settings.max_upload_mb} MB upload limit.",
-                    )
-                output_file.write(chunk)
+
+                total_size += len(chunk)
+
+                if total_size > settings.max_upload_mb * 1024 * 1024:
+                    raise HTTPException(413, "PDF này quá lớn. Vui lòng tải lên tệp PDF có kích thước nhỏ hơn hoặc bằng 100MB.")
+
+                output.write(chunk)
 
         if not first_chunk.startswith(b"%PDF-"):
-            raise HTTPException(
-                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
-                detail="Uploaded file is not a PDF.",
-            )
-        if total_bytes == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded PDF is empty.",
-            )
+            raise HTTPException(415, "file này không phải là PDF hợp lệ. Vui lòng tải lên tệp PDF hợp lệ.")
 
-        temporary_pdf.replace(source_pdf)
+        if total_size == 0:
+            raise HTTPException(400, "file PDF này trống hoặc không thể đọc được. Vui lòng tải lên tệp PDF hợp lệ.")
+
+        # Đếm số trang PDF
         try:
-            page_count = len(PdfReader(str(source_pdf), strict=False).pages)
-        except Exception as error:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded PDF cannot be read.",
-            ) from error
+            page_count = len(PdfReader(str(source_pdf)).pages)
+        except Exception:
+            raise HTTPException(400, "Không thể đọc số trang PDF. Vui lòng tải lên tệp PDF hợp lệ.")
 
-        if page_count < 1:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="PDF contains no pages.",
-            )
-        if page_count > settings.max_pdf_pages:
-            raise HTTPException(
-                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                detail=f"PDF exceeds the {settings.max_pdf_pages} page limit.",
-            )
+        if page_count < 1 or page_count > settings.max_pdf_pages:
+            raise HTTPException(400, f"số trang PDF không hợp lệ. Vui lòng tải lên tệp PDF có số trang tối đa là {settings.max_pdf_pages}.")
 
-        original_filename = Path(file.filename or "upload.pdf").name
-        job = ocr_queue.enqueue(
+        # Thêm công việc vào Redis Queue
+        filename = Path(file.filename or "upload.pdf").name
+
+        job = queue.enqueue(
             process_ocr_job,
             job_id,
             str(source_pdf),
-            original_filename,
+            filename,
             job_id=job_id,
             job_timeout=settings.job_timeout_seconds,
-            result_ttl=JOB_RETENTION_SECONDS,
-            failure_ttl=JOB_RETENTION_SECONDS,
+            result_ttl=settings.job_retention_days * 86400,
+            failure_ttl=settings.job_retention_days * 86400,
             meta={
-                "source_filename": original_filename,
+                "source_filename": filename,
                 "page_count": page_count,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             },
         )
+
         return {
             "job_id": job.id,
             "status": "queued",
-            "status_url": f"/api/v1/jobs/{job.id}",
-            "result_url": f"/api/v1/jobs/{job.id}/result",
             "page_count": page_count,
         }
-    except HTTPException:
-        shutil.rmtree(job_directory, ignore_errors=True)
-        raise
-    except RedisError as error:
-        shutil.rmtree(job_directory, ignore_errors=True)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis is unavailable; the job was not queued.",
-        ) from error
+
     except Exception:
         shutil.rmtree(job_directory, ignore_errors=True)
         raise
+
     finally:
         await file.close()
 
 
-@app.get(
-    "/api/v1/jobs/{job_id}",
-    dependencies=[Depends(require_api_token)],
-)
-def get_job(job_id: str):
-    job = _job_or_404(job_id)
-    try:
-        job.refresh()
-        normalized_status = _normalized_job_status(job)
-        response = {
-            "job_id": job.id,
-            "status": normalized_status,
-            "created_at": job.meta.get("created_at"),
-            "source_filename": job.meta.get("source_filename"),
-            "page_count": job.meta.get("page_count"),
-            "result_url": f"/api/v1/jobs/{job.id}/result",
-        }
-        if normalized_status == "failed":
-            response["error"] = "OCR job failed. Check worker logs for details."
-        return response
-    except RedisError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis is unavailable.",
-        ) from error
+# Lấy trạng thái công việc
+@app.get("/api/v1/jobs/{job_id}")
+def get_job_status(job_id: str,_: None = Depends(authenticate)):
+    job = get_job(job_id)
+
+    status = job.get_status(refresh=True)
+    status = getattr(status, "value", status)
+
+    status = str(status).lower()
+
+    if status == "finished":
+        status = "succeeded"
+    elif status in ("started", "busy"):
+        status = "running"
+    elif status in ("queued", "deferred", "scheduled"):
+        status = "queued"
+    else:
+        status = "failed"
+
+    return {
+        "job_id": job.id,
+        "status": status,
+        "source_filename": job.meta.get("source_filename"),
+        "page_count": job.meta.get("page_count"),
+        "created_at": job.meta.get("created_at"),
+    }
 
 
-@app.get(
-    "/api/v1/jobs/{job_id}/result",
-    dependencies=[Depends(require_api_token)],
-)
-def get_job_result(job_id: str):
-    job = _job_or_404(job_id)
-    try:
-        normalized_status = _normalized_job_status(job)
-        if normalized_status != "succeeded":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Job result is not ready (status: {normalized_status}).",
-            )
+# Lấy kết quả OCR
+@app.get("/api/v1/jobs/{job_id}/result")
+def get_job_result(
+    job_id: str,
+    _: None = Depends(authenticate),
+):
+    job = get_job(job_id)
 
-        result_path = settings.job_root / job.id / "result.json"
-        if not result_path.is_file():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Job result file not found.",
-            )
-        try:
-            payload = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Job result could not be read.",
-            ) from error
-        return JSONResponse(content=payload)
-    except RedisError as error:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Redis is unavailable.",
-        ) from error
+    status = job.get_status(refresh=True)
+    status = getattr(status, "value", status)
+
+    if str(status).lower() != "finished":
+        raise HTTPException(409, "Job chưa hoàn thành. Vui lòng kiểm tra lại trạng thái của job trước khi lấy kết quả.")
+
+    result_path = settings.job_root / job_id / "result.json"
+
+    if not result_path.is_file():
+        raise HTTPException(404, "Không tìm thấy kết quả OCR. Vui lòng kiểm tra lại ID của job hoặc xác nhận rằng job đã hoàn thành.")
+
+    return json.loads(result_path.read_text(encoding="utf-8"))
