@@ -1,8 +1,11 @@
 """Authenticated local API for submitting and polling OCR jobs."""
 
+import asyncio
 import hmac
 import json
+import logging
 import shutil
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -25,13 +28,46 @@ from rq.exceptions import NoSuchJobError
 from rq.job import Job
 
 from .settings import settings
+from .cleanup import cleanup_expired_job_directories
 from .tasks import process_ocr_job
+
+
+logger = logging.getLogger(__name__)
+CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+async def _retention_cleanup_loop():
+    while True:
+        try:
+            removed = await asyncio.to_thread(
+                cleanup_expired_job_directories,
+                settings.job_root,
+                redis_connection,
+                settings.job_retention_days,
+            )
+            if removed:
+                logger.info("Retention cleanup removed %d OCR job directories", len(removed))
+        except Exception:
+            logger.exception("OCR job retention cleanup failed; it will retry later")
+        await asyncio.sleep(CLEANUP_INTERVAL_SECONDS)
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    cleanup_task = asyncio.create_task(_retention_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cleanup_task
 
 
 app = FastAPI(
     title="Relay OCR Local API",
     version="1.0.0",
     description="Local asynchronous PDF OCR API backed by Redis Queue.",
+    lifespan=lifespan,
 )
 
 redis_connection = Redis.from_url(settings.redis_url)

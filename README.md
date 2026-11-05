@@ -43,10 +43,10 @@ python -c "import paddle; print(paddle.__version__)"
 
 chỉ xuất ảnh khi ở chế độ debug
 
-## API OCR local (Phase 1)
+## API OCR local
 
-API nhận PDF, lưu theo job và đưa vào Redis Queue. Worker ở Phase 2 chạy OCR
-tuần tự bằng pipeline hiện có rồi ghi JSON kết quả vào thư mục của job.
+API nhận PDF, lưu theo job và đưa vào Redis Queue. Worker chạy OCR tuần tự
+bằng pipeline hiện có rồi ghi JSON kết quả vào thư mục của job.
 
 ### Khởi động Redis
 
@@ -86,6 +86,11 @@ Worker dùng RQ `SimpleWorker` cùng `TimerDeathPenalty` trên Windows và xử 
 mỗi lần một job. Model OCR
 được nạp trong worker khi job đầu tiên bắt đầu, sau đó dùng lại cho các job sau.
 
+Mỗi thành phần chạy trong cửa sổ/process riêng: Redis trong Docker Desktop, API
+trong một PowerShell, worker trong PowerShell thứ hai, và các lệnh client trong
+PowerShell thứ ba (hoặc một cửa sổ đang rảnh). API và client phải đặt cùng
+`OCR_API_TOKEN`; worker không cần token này.
+
 ### Gọi API
 
 Mở PowerShell thứ hai tại repo, đặt cùng token rồi gửi PDF:
@@ -109,3 +114,29 @@ API trả `202 Accepted` cùng `job_id`. Khi worker hoàn tất, polling trả t
 Invoke-RestMethod http://127.0.0.1:8010/health/live
 Invoke-RestMethod http://127.0.0.1:8010/health/ready
 ```
+
+### Retention và cleanup
+
+RQ giữ metadata của job thành công/thất bại trong `JOB_RETENTION_DAYS` ngày
+(mặc định 7 ngày). API chạy cleanup lúc khởi động và sau đó mỗi 6 giờ. Cleanup
+chỉ xét thư mục job có ID dạng UUID, đã không thay đổi trong thời gian retention,
+và job đã ở trạng thái kết thúc hoặc không còn metadata trong Redis. Job queued
+hoặc running được giữ lại. Nếu Redis không khả dụng, lượt cleanup đó bị bỏ qua
+và sẽ thử lại ở chu kỳ tiếp theo.
+
+Có thể xem trước các thư mục đủ điều kiện bị dọn bằng lệnh sau; mặc định lệnh
+này không xóa dữ liệu:
+
+```powershell
+.\.venv\Scripts\python.exe -m scr.api.cleanup
+```
+
+Khi cần dọn thủ công, trước tiên xem trước với đúng `OCR_JOB_ROOT` và
+`JOB_RETENTION_DAYS`. Chỉ thêm `--apply` khi danh sách preview đúng:
+
+```powershell
+.\.venv\Scripts\python.exe -m scr.api.cleanup --apply
+```
+
+Có thể truyền `--job-root` và `--retention-days` để kiểm tra trên một thư mục
+thử nghiệm riêng. API không cung cấp endpoint xóa job.
