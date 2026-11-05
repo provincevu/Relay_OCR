@@ -18,7 +18,7 @@ from pathlib import Path
 import cv2
 from pypdf import PdfReader
 
-from scr.services.PageEvidence import PageEvidenceService
+from ..PageEvidence import PageEvidenceService
 
 
 OCR_EVIDENCE_CACHE_SCHEMA = 1
@@ -636,9 +636,9 @@ class InputLoader:
 
     def _is_comment_page(self, image_path):
         """Phân loại page comment bằng logic hình ảnh hiện có."""
-        from scripts.data.export_pages_3plus import _is_comment_page
+        from .comment_page_classifier import is_comment_page
 
-        return _is_comment_page(image_path)
+        return is_comment_page(image_path)
 
     def _normalize(self, text):
         """Chuẩn hóa text OCR để tìm pattern không phụ thuộc dấu."""

@@ -8,7 +8,7 @@
 
 from pathlib import Path
 
-from scripts.inference.page_n_prediction_filter import (
+from .page_n_prediction_filter import (
     CROSS_ROW_MAX_VERTICAL_GAP,
     CROSS_ROW_MIN_HORIZONTAL_OVERLAP,
     CROSS_ROW_MIN_SCORE_MARGIN,
@@ -16,7 +16,7 @@ from scripts.inference.page_n_prediction_filter import (
     filter_prediction_pages,
     filter_unlinked_regions,
 )
-from scripts.inference.role_change_metadata import write_role_change_metadata
+from .role_change_metadata import write_role_change_metadata
 
 
 class TextPostprocessing:

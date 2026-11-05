@@ -11,7 +11,7 @@ from pathlib import Path
 import torch
 from transformers import LayoutLMv3Config, LayoutLMv3Model, LayoutLMv3TokenizerFast
 
-from scripts.training.page3_layout_model import (
+from .layout_model import (
     Page3LayoutModel,
     encode_page,
     predict_page,

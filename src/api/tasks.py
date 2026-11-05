@@ -18,7 +18,7 @@ def get_ocr_service():
             settings.config_path.read_text(encoding="utf-8")
         )
 
-        from scr.ocr_service import OCRService
+        from src.ocr_service import OCRService
 
         ocr_service = OCRService(config)
 
@@ -43,7 +43,7 @@ def process_ocr_job(job_id, source_pdf_path, original_filename=None):
     # 3. Chạy OCR
     result = get_ocr_service().process_pdf(str(source_pdf),output_directory=output_directory)
 
-    # 4. xóa thông tin debug cache nếu có, để tránh lưu trữ thông tin không cần thiết trong kết quả
+    # 4. xóa thông tin debug cache và chuẩn hóa giúp ẩn path gốc của file PDF để tránh lộ thông tin nhạy cảm trong kết quả OCR
     result.pop("_debug_cache", None)
 
     if isinstance(result.get("source_pdf"), dict):

@@ -68,18 +68,18 @@ Trong PowerShell:
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 $env:OCR_API_TOKEN = "set-the-same-secret-in-the-client-terminal"
-.\.venv\Scripts\python.exe -m uvicorn scr.api.app:app --host 127.0.0.1 --port 8010
+.\.venv\Scripts\python.exe -m uvicorn src.api.app:app --host 127.0.0.1 --port 18010
 ```
 
 Token chỉ có hiệu lực trong cửa sổ PowerShell hiện tại. Không commit token thật
-vào repo. API mặc định chỉ nghe trên loopback.
+vào repo. API mặc định chỉ nghe trên loopback và dùng cổng `18010`.
 
 Mở PowerShell thứ hai tại root repo để chạy worker. API và worker phải cùng
 `REDIS_URL`, `OCR_JOB_ROOT`, `OCR_CONFIG_PATH` nếu bạn đã đổi các giá trị mặc
 định:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scr.api.worker
+.\.venv\Scripts\python.exe -m src.api.worker
 ```
 
 Worker dùng RQ `SimpleWorker` cùng `TimerDeathPenalty` trên Windows và xử lý
@@ -99,43 +99,39 @@ Mở PowerShell thứ hai tại repo, đặt cùng token rồi gửi PDF:
 $env:OCR_API_TOKEN = "replace-this-with-a-local-secret"
 $headers = @{ Authorization = "Bearer $env:OCR_API_TOKEN" }
 $job = curl.exe -sS -X POST `
-  http://127.0.0.1:8010/api/v1/jobs `
+  http://127.0.0.1:18010/api/v1/jobs `
   -H "Authorization: Bearer $env:OCR_API_TOKEN" `
   -F "file=@C:\path\to\sample.pdf;type=application/pdf" | ConvertFrom-Json
 $job
-Invoke-RestMethod "http://127.0.0.1:8010/api/v1/jobs/$($job.job_id)" -Headers $headers
-Invoke-RestMethod "http://127.0.0.1:8010/api/v1/jobs/$($job.job_id)/result" -Headers $headers
+Invoke-RestMethod "http://127.0.0.1:18010/api/v1/jobs/$($job.job_id)" -Headers $headers
+Invoke-RestMethod "http://127.0.0.1:18010/api/v1/jobs/$($job.job_id)/result" -Headers $headers
 ```
 
 API trả `202 Accepted` cùng `job_id`. Khi worker hoàn tất, polling trả trạng thái
 `succeeded` và endpoint result trả JSON OCR. Health checks không cần token:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8010/health/live
-Invoke-RestMethod http://127.0.0.1:8010/health/ready
+Invoke-RestMethod http://127.0.0.1:18010/health
 ```
 
 ### Retention và cleanup
 
 RQ giữ metadata của job thành công/thất bại trong `JOB_RETENTION_DAYS` ngày
-(mặc định 7 ngày). API chạy cleanup lúc khởi động và sau đó mỗi 6 giờ. Cleanup
-chỉ xét thư mục job có ID dạng UUID, đã không thay đổi trong thời gian retention,
-và job đã ở trạng thái kết thúc hoặc không còn metadata trong Redis. Job queued
-hoặc running được giữ lại. Nếu Redis không khả dụng, lượt cleanup đó bị bỏ qua
-và sẽ thử lại ở chu kỳ tiếp theo.
+(mặc định 7 ngày). Cleanup file job được gọi thủ công bằng module bên dưới.
+Lệnh chỉ xét thư mục job quá hạn; job queued/running được giữ lại.
 
 Có thể xem trước các thư mục đủ điều kiện bị dọn bằng lệnh sau; mặc định lệnh
 này không xóa dữ liệu:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scr.api.cleanup
+.\.venv\Scripts\python.exe -m src.api.cleanup
 ```
 
 Khi cần dọn thủ công, trước tiên xem trước với đúng `OCR_JOB_ROOT` và
 `JOB_RETENTION_DAYS`. Chỉ thêm `--apply` khi danh sách preview đúng:
 
 ```powershell
-.\.venv\Scripts\python.exe -m scr.api.cleanup --apply
+.\.venv\Scripts\python.exe -m src.api.cleanup --apply
 ```
 
 Có thể truyền `--job-root` và `--retention-days` để kiểm tra trên một thư mục
