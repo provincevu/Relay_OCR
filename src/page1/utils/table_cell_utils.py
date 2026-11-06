@@ -6,198 +6,183 @@
 # Input/output: nhận ảnh BGR hoặc bbox; trả text region và cell đã chuẩn hóa.
 # Contract: bbox dùng khóa coordinate theo dạng [xmin, ymin, xmax, ymax].
 
+
 import cv2
 import numpy as np
 
 
 class TableCellProcessor:
-    """Xử lý detection, recognition và gán text cho cell TABLE 01."""
+    """Nhận dạng text và xử lý quan hệ giữa cell với các vùng OCR."""
 
-    # Khởi tạo bộ xử lý và tái sử dụng các model OCR từ service điều phối.
-    def __init__(
-        self,
-        text_detector,
-        text_recognitor,
-        ppocr_recognitor,
-    ):
-        """Lưu các model cần dùng trong quá trình xử lý cell."""
+    def __init__(self, text_detector, text_recognitor, ppocr_recognitor):
+        """Lưu các model dùng chung để tránh khởi tạo lại khi xử lý từng ảnh."""
         self.text_detector = text_detector
         self.text_recognitor = text_recognitor
         self.ppocr_recognitor = ppocr_recognitor
 
-    # Nhận dạng từng text polygon bằng VietOCR và PP-OCRv6.
     def recognize_text(self, image):
-        """Nhận dạng text trong table crop bằng hai model."""
+        """Phát hiện vùng text, tách vùng qua divider nếu cần rồi nhận dạng."""
         text_regions = []
         height, width = image.shape[:2]
+        # Divider giúp tách một box OCR vô tình phủ qua hai cột của bảng. vì có thể OCR sẽ nhận dạng nhầm text của hai cột vào cùng một box.
         divider_x = self._detect_main_vertical_divider(image)
-        detection_results = self.text_detector.detect(image)
 
-        # Duyệt toàn bộ polygon mà text detector trả về.
-        for result in detection_results:
+        results = self.text_detector.detect(image)
+
+        for result in results:
             for polygon in result["dt_polys"]:
                 polygon = np.array(polygon, dtype=np.float32)
+
                 split_polygons = self._split_polygon_at_divider(
-                    polygon,
-                    divider_x,
-                    width,
+                    polygon, divider_x, width
                 )
 
-                # OCR riêng từng nửa nếu polygon cắt qua divider chính.
-                for split_polygon in split_polygons:
-                    x_min, y_min = split_polygon.min(axis=0).astype(int)
-                    x_max, y_max = split_polygon.max(axis=0).astype(int)
+                for polygon in split_polygons:
+                    x_min, y_min = polygon.min(axis=0).astype(int)
+                    x_max, y_max = polygon.max(axis=0).astype(int)
+
                     x_min = max(x_min, 0)
                     y_min = max(y_min, 0)
                     x_max = min(x_max, width)
                     y_max = min(y_max, height)
+
+                    # Cắt vùng text từ ảnh gốc để nhận dạng
                     text_crop = image[y_min:y_max, x_min:x_max]
+
                     text = self.text_recognitor.recognize(text_crop)
-                    ppocr_result = self.ppocr_recognitor.predict(
-                        text_crop,
-                        batch_size=1,
+                    ppocr = self.ppocr_recognitor.predict(
+                        text_crop, batch_size=1
                     )[0]
-                    text_regions.append(
-                        {
-                            "polygon": split_polygon.tolist(),
-                            "center": [
-                                float(split_polygon[:, 0].mean()),
-                                float(split_polygon[:, 1].mean()),
-                            ],
-                            "text": text,
-                            "ppocr_text": ppocr_result["rec_text"],
-                        }
-                    )
+
+                    text_regions.append({
+                        "polygon": polygon.tolist(),
+                        "center": [
+                            float(polygon[:, 0].mean()),
+                            float(polygon[:, 1].mean()),
+                        ],
+                        "text": text,
+                        "ppocr_text": ppocr["rec_text"],
+                    })
 
         return text_regions
 
-    # Loại các cell lồng nhau trước khi lọc theo score.
     def resolve_nested_cell_boxes(self, image, cell_boxes):
-        """Giữ cell vật lý phù hợp với đường kẻ thật trong bảng."""
-        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        """
+            Chọn box cell hợp lý khi detector trả cả box cha và box con.
+            +-----------------------+
+            |       Box cha         |
+            |  +------+  +------+   |
+            |  | Con1 |  | Con2 |   |
+            |  +------+  +------+   |
+            +-----------------------+
+            sắp xếp các box từ lớn nhất đến nhỏ nhất, để box lớn được xử lý trước với vai trò là box cha.
+            Chọn một box lớn làm parent.
+            Tìm các box nhỏ nằm bên trong nó làm children.
+            Kiểm tra ảnh có đường kẻ thật phân cách các box con hay không:
+                - Nếu có đường phân cách thật: giữ các box con, loại bỏ box cha.
+                - Nếu không có đường phân cách thật: giữ box cha, loại bỏ các box con vì chúng có thể là nhận diện sai hoặc box lồng giả.
+        
+        """
+        # Otsu tạo line mask để phân biệt cell con thật với box lồng giả. (vì box lồng giả thường không có đường kẻ phân cách thật giữa các cell con)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         _, line_mask = cv2.threshold(
-            gray_image,
-            0,
-            255,
-            cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU,
+            gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
         )
-        removed_indexes = set()
-        box_indexes = sorted(
+
+        removed = set()
+        # Xét box lớn trước để quyết định box cha có nên bị thay bằng các con.
+        indexes = sorted(
             range(len(cell_boxes)),
-            key=lambda index: _box_area(cell_boxes[index]),
+            key=lambda i: _box_area(cell_boxes[i]),
             reverse=True,
         )
 
-        # Xét box lớn trước để phân xử quan hệ cha và con ổn định.
-        for parent_index in box_indexes:
-            if parent_index in removed_indexes:
+        for parent_index in indexes:
+            if parent_index in removed:
                 continue
 
-            parent_box = cell_boxes[parent_index]
-            child_indexes = [
-                child_index
-                for child_index in box_indexes
-                if child_index != parent_index
-                and child_index not in removed_indexes
-                and self._is_nested_cell(
-                    parent_box,
-                    cell_boxes[child_index],
-                )
+            parent = cell_boxes[parent_index]
+
+            children = [
+                i for i in indexes
+                if i != parent_index
+                and i not in removed
+                and self._is_nested_cell(parent, cell_boxes[i])
             ]
-            if not child_indexes:
+
+            if not children:
                 continue
 
-            child_boxes = [
-                cell_boxes[child_index]
-                for child_index in child_indexes
-            ]
+            child_boxes = [cell_boxes[i] for i in children]
 
-            # Có separator thật thì giữ các cell con và loại cell gộp.
+            # Chỉ giữ cell con khi ảnh có đường phân cách thật giữa chúng.
             if self._children_have_real_separator(
-                line_mask,
-                parent_box,
-                child_boxes,
+                line_mask, parent, child_boxes
             ):
-                removed_indexes.add(parent_index)
-                continue
-
-            # Không có separator thì giữ cell vật lý lớn và loại box con giả.
-            removed_indexes.update(child_indexes)
+                removed.add(parent_index)
+            else:
+                removed.update(children)
 
         return [
-            cell_box
-            for index, cell_box in enumerate(cell_boxes)
-            if index not in removed_indexes
+            box for i, box in enumerate(cell_boxes)
+            if i not in removed
         ]
 
-    # Gán mỗi text region vào cell nhỏ nhất chứa tâm polygon.
     def assign_text_to_cells(self, cell_boxes, text_regions):
-        """Gán text vào cell và giữ text region phục vụ sửa value."""
-        sorted_boxes = sort_boxes_left_to_right(cell_boxes)
+        """Gán mỗi vùng OCR vào cell nhỏ nhất chứa tâm vùng đó."""
         cells = []
 
-        # Chuẩn hóa coordinate và score của từng cell.
-        for box in sorted_boxes:
-            cells.append(
-                {
-                    "coordinate": [
-                        float(value) for value in box["coordinate"]
-                    ],
-                    "score": float(box["score"]),
-                    "text_regions": [],
-                }
-            )
+        for box in sort_boxes_left_to_right(cell_boxes):
+            cells.append({
+                "coordinate": [float(v) for v in box["coordinate"]],
+                "score": float(box["score"]),
+                "text_regions": [],
+            })
 
-        unassigned_texts = []
-        # Chỉ dùng tâm polygon để quyết định text thuộc cell nào.
-        for text_region in text_regions:
-            center_x, center_y = text_region["center"]
-            matched_cells = [
-                cell
-                for cell in cells
+        unassigned = []
+
+        for region in text_regions:
+            center_x, center_y = region["center"]
+
+            matched = [
+                cell for cell in cells
                 if cell["coordinate"][0] <= center_x <= cell["coordinate"][2]
-                and cell["coordinate"][1]
-                <= center_y
-                <= cell["coordinate"][3]
+                and cell["coordinate"][1] <= center_y <= cell["coordinate"][3]
             ]
 
-            if matched_cells:
-                matched_cell = min(matched_cells, key=_box_area)
-                matched_cell["text_regions"].append(text_region)
+            if matched:
+                # Khi box lồng nhau, cell nhỏ nhất là nơi chứa text chính xác nhất.
+                cell = min(matched, key=_box_area)
+                cell["text_regions"].append(region)
             else:
-                unassigned_texts.append(text_region)
+                unassigned.append(region)
 
-        # Ghép text theo thứ tự đọc trong từng cell.
         for cell in cells:
-            cell["text_regions"] = _sort_text_regions(
-                cell["text_regions"]
-            )
-            cell["text"] = " ".join(
-                region["text"] for region in cell["text_regions"]
-            )
+            regions = _sort_text_regions(cell["text_regions"])
+            cell["text_regions"] = regions
+            cell["text"] = " ".join(r["text"] for r in regions)
             cell["ppocr_text"] = " ".join(
-                region["ppocr_text"]
-                for region in cell["text_regions"]
+                r["ppocr_text"] for r in regions
             )
 
-        return cells, unassigned_texts
+        return cells, unassigned
 
-    # Tìm divider dọc dài nằm gần giữa bảng.
     def _detect_main_vertical_divider(self, image):
-        """Tìm đường phân cách dọc chính để tách text dính hai cột."""
+        """Tìm đường dọc dài gần giữa bảng để tách box OCR đi qua hai cột."""
         _, image_width = image.shape[:2]
+        # Giới hạn chiều rộng giúp Hough ổn định và tránh xử lý ảnh rất lớn.
         scale = min(1.0, 600 / image_width)
-        resized_image = cv2.resize(
-            image,
-            None,
-            fx=scale,
-            fy=scale,
+
+        resized = cv2.resize(
+            image, None, fx=scale, fy=scale,
             interpolation=cv2.INTER_AREA,
         )
-        gray_image = cv2.cvtColor(resized_image, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray_image, 30, 100, apertureSize=3)
-        height, width = gray_image.shape
-        detected_lines = cv2.HoughLinesP(
+
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 30, 100, apertureSize=3)
+        height, width = gray.shape
+
+        lines = cv2.HoughLinesP(
             edges,
             1,
             np.pi / 1800,
@@ -206,21 +191,24 @@ class TableCellProcessor:
             maxLineGap=int(height * 0.2),
         )
 
-        if detected_lines is None:
+        if lines is None:
             return None
 
         candidates = []
-        # Chỉ giữ các line đủ dài, gần dọc và nằm trong vùng giữa bảng.
-        for x_start, y_start, x_end, y_end in detected_lines.reshape(-1, 4):
-            vertical_span = abs(int(y_end) - int(y_start))
-            horizontal_span = abs(int(x_end) - int(x_start))
-            center_x = (int(x_start) + int(x_end)) / 2
+
+        # Chỉ nhận đường gần thẳng đứng, đủ dài và nằm trong vùng giữa bảng.
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            vertical_span = abs(int(y2) - int(y1))
+            horizontal_span = abs(int(x2) - int(x1))
+            center_x = (int(x1) + int(x2)) / 2
+
             if vertical_span < height * 0.25:
                 continue
             if horizontal_span > vertical_span * 0.08:
                 continue
             if not width * 0.4 < center_x < width * 0.7:
                 continue
+
             candidates.append((vertical_span, center_x))
 
         if not candidates:
@@ -229,197 +217,172 @@ class TableCellProcessor:
         _, divider_x = max(candidates)
         return int(round(divider_x / scale))
 
-    # Tách polygon nếu nó vượt qua divider dọc chính.
     def _split_polygon_at_divider(self, polygon, divider_x, image_width):
-        """Tách text polygon thành hai vùng ở hai phía divider."""
+        """Chia polygon qua divider khi hai phần tạo ra đủ rộng để nhận dạng."""
         if divider_x is None:
             return [polygon]
 
         x_min, y_min = polygon.min(axis=0)
         x_max, y_max = polygon.max(axis=0)
+
         minimum_width = max(20, int(image_width * 0.02))
+
+        # Tránh tạo mảnh quá hẹp: chúng thường là lỗi cắt và OCR không hữu ích.
         if (
             divider_x - x_min < minimum_width
             or x_max - divider_x < minimum_width
         ):
             return [polygon]
 
-        left_polygon = np.array(
-            [
-                [x_min, y_min],
-                [divider_x - 1, y_min],
-                [divider_x - 1, y_max],
-                [x_min, y_max],
-            ],
-            dtype=np.float32,
-        )
-        right_polygon = np.array(
-            [
-                [divider_x + 1, y_min],
-                [x_max, y_min],
-                [x_max, y_max],
-                [divider_x + 1, y_max],
-            ],
-            dtype=np.float32,
-        )
-        return [left_polygon, right_polygon]
+        left = np.array([
+            [x_min, y_min],
+            [divider_x - 1, y_min],
+            [divider_x - 1, y_max],
+            [x_min, y_max],
+        ], dtype=np.float32)
 
-    # Kiểm tra box con có nằm gần như hoàn toàn trong box cha.
+        right = np.array([
+            [divider_x + 1, y_min],
+            [x_max, y_min],
+            [x_max, y_max],
+            [divider_x + 1, y_max],
+        ], dtype=np.float32)
+
+        return [left, right]
+
     def _is_nested_cell(self, parent_box, child_box):
-        """Xác định quan hệ lồng nhau giữa hai cell box."""
+        """Kiểm tra box con có nằm gần như hoàn toàn bên trong box cha không."""
         parent_area = _box_area(parent_box)
         child_area = _box_area(child_box)
+
+        # Box gần bằng box cha không được xem là cell con.
         if child_area > parent_area * 0.85:
             return False
 
-        parent_x_min, parent_y_min, parent_x_max, parent_y_max = map(
-            float,
-            parent_box["coordinate"],
-        )
-        child_x_min, child_y_min, child_x_max, child_y_max = map(
-            float,
-            child_box["coordinate"],
-        )
+        px1, py1, px2, py2 = map(float, parent_box["coordinate"])
+        cx1, cy1, cx2, cy2 = map(float, child_box["coordinate"])
+
         intersection_width = max(
-            0.0,
-            min(parent_x_max, child_x_max)
-            - max(parent_x_min, child_x_min),
+            0.0, min(px2, cx2) - max(px1, cx1)
         )
         intersection_height = max(
-            0.0,
-            min(parent_y_max, child_y_max)
-            - max(parent_y_min, child_y_min),
+            0.0, min(py2, cy2) - max(py1, cy1)
         )
+
         intersection_area = intersection_width * intersection_height
         return intersection_area / child_area >= 0.9
 
-    # Kiểm tra separator dọc hoặc ngang giữa các cell con.
     def _children_have_real_separator(
-        self,
-        line_mask,
-        parent_box,
-        child_boxes,
+        self, line_mask, parent_box, child_boxes
     ):
-        """Kiểm tra các cell con có được ngăn bởi đường kẻ thật."""
-        parent_x_min, parent_y_min, parent_x_max, parent_y_max = map(
-            float,
-            parent_box["coordinate"],
-        )
-        parent_width = parent_x_max - parent_x_min
-        parent_height = parent_y_max - parent_y_min
+        """Xác minh cell con có đường kẻ chia thật trong ảnh hay chỉ là box giả."""
+        px1, py1, px2, py2 = map(float, parent_box["coordinate"])
+        parent_width = px2 - px1
+        parent_height = py2 - py1
 
-        # So sánh từng cặp cell con để tìm ranh giới có đường kẻ.
-        for first_index, first_box in enumerate(child_boxes):
-            first_coordinate = list(map(float, first_box["coordinate"]))
-            for second_box in child_boxes[first_index + 1 :]:
-                second_coordinate = list(
-                    map(float, second_box["coordinate"])
+        for i, first_box in enumerate(child_boxes):
+            first = list(map(float, first_box["coordinate"]))
+
+            for second_box in child_boxes[i + 1:]:
+                second = list(map(float, second_box["coordinate"]))
+
+                left, right = sorted(
+                    [first, second], key=lambda box: box[0]
                 )
-                left_box, right_box = sorted(
-                    [first_coordinate, second_coordinate],
-                    key=lambda coordinate: coordinate[0],
-                )
+
                 vertical_overlap = max(
-                    0.0,
-                    min(left_box[3], right_box[3])
-                    - max(left_box[1], right_box[1]),
+                    0.0, min(left[3], right[3]) - max(left[1], right[1])
                 )
-                horizontal_span = (
-                    max(left_box[2], right_box[2])
-                    - min(left_box[0], right_box[0])
-                )
-                horizontal_gap = right_box[0] - left_box[2]
+                horizontal_span = max(left[2], right[2]) - min(left[0], right[0])
+                horizontal_gap = right[0] - left[2]
 
-                # Hai cell cạnh nhau theo chiều ngang cần một line dọc.
+                # Hai cell cạnh nhau cần gần chạm, chồng dọc đủ nhiều và có nét dọc.
                 if (
                     vertical_overlap >= parent_height * 0.65
                     and horizontal_span >= parent_width * 0.8
                     and horizontal_gap <= parent_width * 0.05
                 ):
-                    separator_x = (left_box[2] + right_box[0]) / 2
+                    separator_x = (left[2] + right[0]) / 2
+
                     if self._has_continuous_line(
                         line_mask,
                         separator_x,
-                        max(left_box[1], right_box[1]),
-                        min(left_box[3], right_box[3]),
+                        max(left[1], right[1]),
+                        min(left[3], right[3]),
                         vertical=True,
                     ):
                         return True
 
-                top_box, bottom_box = sorted(
-                    [first_coordinate, second_coordinate],
-                    key=lambda coordinate: coordinate[1],
+                top, bottom = sorted(
+                    [first, second], key=lambda box: box[1]
                 )
-                horizontal_overlap = max(
-                    0.0,
-                    min(top_box[2], bottom_box[2])
-                    - max(top_box[0], bottom_box[0]),
-                )
-                vertical_span = (
-                    max(top_box[3], bottom_box[3])
-                    - min(top_box[1], bottom_box[1])
-                )
-                vertical_gap = bottom_box[1] - top_box[3]
 
-                # Hai cell cạnh nhau theo chiều dọc cần một line ngang.
+                horizontal_overlap = max(
+                    0.0, min(top[2], bottom[2]) - max(top[0], bottom[0])
+                )
+                vertical_span = max(top[3], bottom[3]) - min(top[1], bottom[1])
+                vertical_gap = bottom[1] - top[3]
+
+                # Tương tự cho hai cell xếp trên-dưới, dùng nét ngang làm bằng chứng.
                 if (
                     horizontal_overlap >= parent_width * 0.65
                     and vertical_span >= parent_height * 0.8
                     and vertical_gap <= parent_height * 0.05
                 ):
-                    separator_y = (top_box[3] + bottom_box[1]) / 2
+                    separator_y = (top[3] + bottom[1]) / 2
+
                     if self._has_continuous_line(
                         line_mask,
                         separator_y,
-                        max(top_box[0], bottom_box[0]),
-                        min(top_box[2], bottom_box[2]),
+                        max(top[0], bottom[0]),
+                        min(top[2], bottom[2]),
                         vertical=False,
                     ):
                         return True
 
         return False
 
-    # Đo độ liên tục của line quanh vị trí separator dự kiến.
     def _has_continuous_line(
-        self,
-        line_mask,
-        position,
-        span_start,
-        span_end,
-        vertical,
+        self, line_mask, position, span_start, span_end, vertical
     ):
-        """Xác nhận separator bằng tỷ lệ pixel tối liên tục."""
+        """Đo tỷ lệ nét liên tục quanh vị trí separator theo một trục."""
         height, width = line_mask.shape
         span_length = span_end - span_start
+        # Bỏ vùng gần góc cell để đường viền không bị nhầm thành separator.
         margin = max(2, int(span_length * 0.08))
         radius = max(3, int(min(height, width) * 0.006))
 
-        # Line dọc được đo theo từng cột trong vùng hẹp quanh separator.
         if vertical:
-            y_start = max(0, int(round(span_start)) + margin)
-            y_end = min(height, int(round(span_end)) - margin)
-            x_start = max(0, int(round(position)) - radius)
-            x_end = min(width, int(round(position)) + radius + 1)
-            region = line_mask[y_start:y_end, x_start:x_end]
+            y1 = max(0, int(round(span_start)) + margin)
+            y2 = min(height, int(round(span_end)) - margin)
+            x1 = max(0, int(round(position)) - radius)
+            x2 = min(width, int(round(position)) + radius + 1)
+            region = line_mask[y1:y2, x1:x2]
+
             if region.size == 0:
                 return False
+
+            # Chọn cột có tỷ lệ pixel mực cao nhất dọc theo vùng kiểm tra.
             continuity = np.max(np.mean(region > 0, axis=0))
+
         else:
-            x_start = max(0, int(round(span_start)) + margin)
-            x_end = min(width, int(round(span_end)) - margin)
-            y_start = max(0, int(round(position)) - radius)
-            y_end = min(height, int(round(position)) + radius + 1)
-            region = line_mask[y_start:y_end, x_start:x_end]
+            x1 = max(0, int(round(span_start)) + margin)
+            x2 = min(width, int(round(span_end)) - margin)
+            y1 = max(0, int(round(position)) - radius)
+            y2 = min(height, int(round(position)) + radius + 1)
+            region = line_mask[y1:y2, x1:x2]
+
             if region.size == 0:
                 return False
+
+            # Với đường ngang, đo tương tự theo từng hàng pixel.
             continuity = np.max(np.mean(region > 0, axis=1))
 
         return continuity >= 0.7
 
 
-# Sắp xếp bbox theo từng hàng và từ trái sang phải.
 def sort_boxes_left_to_right(boxes):
-    """Sắp xếp bbox theo thứ tự đọc trong bảng."""
+    """Sắp xếp box theo hàng từ trên xuống dưới, rồi trái sang phải."""
     return [
         box
         for row in group_boxes_into_rows(boxes)
@@ -427,96 +390,84 @@ def sort_boxes_left_to_right(boxes):
     ]
 
 
-# Gom bbox thành các hàng dựa trên vị trí dọc.
 def group_boxes_into_rows(boxes, use_vertical_center=False):
-    """Gom bbox theo hàng và sắp xếp từ trái sang phải."""
+    """Gom box có vị trí dọc gần nhau thành hàng đọc tự nhiên."""
     if not boxes:
         return []
 
     items = []
     heights = []
-    # Chuẩn hóa vị trí dùng để so khớp hàng của từng bbox.
-    for box in boxes:
-        x_min, y_min, x_max, y_max = map(
-            float,
-            box["coordinate"],
-        )
-        row_position = (
-            (y_min + y_max) / 2
-            if use_vertical_center
-            else y_min
-        )
-        items.append(
-            {
-                "box": box,
-                "top": row_position,
-                "left": x_min,
-            }
-        )
-        heights.append(y_max - y_min)
 
-    row_tolerance = max(8.0, float(np.median(heights)) * 0.5)
+    for box in boxes:
+        x1, y1, x2, y2 = map(float, box["coordinate"])
+
+        items.append({
+            "box": box,
+            "top": (y1 + y2) / 2 if use_vertical_center else y1,
+            "left": x1,
+        })
+
+        heights.append(y2 - y1)
+
+    # Dung sai theo chiều cao cell để gom cùng hàng dù box lệch nhẹ theo y.
+    tolerance = max(8.0, float(np.median(heights)) * 0.5)
     rows = []
-    # Ghép bbox vào hàng gần nhất trong tolerance cho phép.
-    for item in sorted(items, key=lambda value: value["top"]):
-        matched_rows = [
-            row
-            for row in rows
-            if abs(item["top"] - row["top"]) <= row_tolerance
+
+    for item in sorted(items, key=lambda x: x["top"]):
+        # Gán vào hàng gần nhất trong dung sai, tránh tạo hàng mới vì nhiễu nhỏ.
+        matched = [
+            row for row in rows
+            if abs(item["top"] - row["top"]) <= tolerance
         ]
-        if matched_rows:
+
+        if matched:
             row = min(
-                matched_rows,
-                key=lambda value: abs(item["top"] - value["top"]),
+                matched,
+                key=lambda x: abs(item["top"] - x["top"]),
             )
             row["items"].append(item)
             row["top"] = sum(
-                value["top"] for value in row["items"]
+                x["top"] for x in row["items"]
             ) / len(row["items"])
         else:
-            rows.append({"top": item["top"], "items": [item]})
+            rows.append({
+                "top": item["top"],
+                "items": [item],
+            })
 
     return [
         [
             item["box"]
-            for item in sorted(
-                row["items"],
-                key=lambda value: value["left"],
-            )
+            for item in sorted(row["items"], key=lambda x: x["left"])
         ]
-        for row in sorted(rows, key=lambda value: value["top"])
+        for row in sorted(rows, key=lambda x: x["top"])
     ]
 
 
-# Sắp xếp text region theo tâm dọc để chịu được ảnh bảng bị nghiêng.
 def _sort_text_regions(text_regions):
-    """Sắp xếp text theo hàng và từ trái sang phải."""
-    text_boxes = []
-    # Chuyển polygon thành bbox tạm thời để dùng chung logic gom hàng.
-    for text_region in text_regions:
-        polygon = np.array(text_region["polygon"], dtype=np.float32)
+    """Sắp xếp vùng OCR theo hàng và vị trí để ghép text đúng thứ tự đọc."""
+    boxes = []
+
+    for region in text_regions:
+        polygon = np.array(region["polygon"], dtype=np.float32)
         x_min, y_min = polygon.min(axis=0)
         x_max, y_max = polygon.max(axis=0)
-        text_boxes.append(
-            {
-                "coordinate": [x_min, y_min, x_max, y_max],
-                "text_region": text_region,
-            }
-        )
 
-    ordered_rows = group_boxes_into_rows(
-        text_boxes,
-        use_vertical_center=True,
-    )
+        boxes.append({
+            "coordinate": [x_min, y_min, x_max, y_max],
+            "text_region": region,
+        })
+
+    rows = group_boxes_into_rows(boxes, use_vertical_center=True)
+
     return [
         box["text_region"]
-        for row in ordered_rows
+        for row in rows
         for box in row
     ]
 
 
-# Tính diện tích bbox phục vụ chọn cell nhỏ nhất và phân xử cell lồng nhau.
 def _box_area(box):
-    """Tính diện tích bbox của một cell."""
-    x_min, y_min, x_max, y_max = map(float, box["coordinate"])
-    return (x_max - x_min) * (y_max - y_min)
+    """Tính diện tích bbox để chọn box nhỏ nhất hoặc kiểm tra box lồng nhau."""
+    x1, y1, x2, y2 = map(float, box["coordinate"])
+    return (x2 - x1) * (y2 - y1)

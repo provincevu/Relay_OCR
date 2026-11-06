@@ -22,7 +22,6 @@ from transformers import (
     LayoutLMv3Config,
     LayoutLMv3Model,
     LayoutLMv3TokenizerFast,
-    get_linear_schedule_with_warmup,
 )
 
 from scripts.training.page3_layout_model import (
@@ -30,26 +29,24 @@ from scripts.training.page3_layout_model import (
     encode_page,
     load_pretrained,
     predict_page,
-    row_links,
 )
 from scripts.inference.page_n_prediction_filter import (
-    filter_prediction_links,
     filter_prediction_pages,
 )
 from scripts.inference.role_change_metadata import write_role_change_metadata
-
-
-ROLES = [
-    "KEY",
-    "VALUE",
-    "HEADER",
-    "FIELD_TABLE",
-    "NOTE",
-    "PAGE_NUMBER",
-    "FORM_NUMBER",
-    "INLINE_KEY_VALUE",
-    "OTHER",
-]
+from scripts.training.metrics import (
+    ROLES,
+    cached_validation_metrics as _cached_validation_metrics,
+    is_trainable_annotation as _is_trainable_annotation,
+    masked_training_loss,
+    validation_metrics,
+)
+from scripts.training.training_utils import (
+    create_scheduler,
+    optimizer_parameters,
+    run_training_epochs,
+    save_checkpoint,
+)
 
 
 def prepare_page(record):
@@ -60,138 +57,6 @@ def prepare_page(record):
             {**region, "bbox": region["box"]}
             for region in record["regions"]
         ],
-    }
-
-
-def _is_trainable_annotation(labels):
-    """Kiểm tra annotation có đúng một role để đưa vào single-class loss."""
-    return "UNLABELED" not in labels and set(labels) != {"KEY", "VALUE"}
-
-
-def masked_training_loss(role_logits, page):
-    """Tính single-class role loss và bỏ qua nhãn không thể biểu diễn."""
-    region_ids = [region["id"] for region in page["regions"]]
-    labels = [page["annotations"][region_id] for region_id in region_ids]
-    target_indices = []
-    known_values = []
-    for labels_for_region in labels:
-        labels_set = set(labels_for_region)
-        known_values.append(_is_trainable_annotation(labels_set))
-        target_role = next(
-            (role for role in ROLES if role in labels_set),
-            "OTHER",
-        )
-        target_indices.append(ROLES.index(target_role))
-    known = torch.tensor(
-        known_values,
-        dtype=torch.bool,
-        device=role_logits.device,
-    )
-    role_targets = torch.tensor(
-        target_indices,
-        dtype=torch.long,
-        device=role_logits.device,
-    )
-    if not known.any():
-        return role_logits.sum() * 0
-    return torch.nn.functional.cross_entropy(
-        role_logits[known],
-        role_targets[known],
-    )
-
-
-def _update_counts(counts, gold, predicted):
-    """Cộng TP/FP/FN của hai tập ID."""
-    counts[0] += len(gold & predicted)
-    counts[1] += len(predicted - gold)
-    counts[2] += len(gold - predicted)
-
-
-def _f1_from_counts(counts):
-    """Tính F1 từ TP/FP/FN."""
-    true_positive, false_positive, false_negative = counts
-    precision = true_positive / (true_positive + false_positive) \
-        if true_positive + false_positive else 0.0
-    recall = true_positive / (true_positive + false_negative) \
-        if true_positive + false_negative else 0.0
-    return 2 * precision * recall / (precision + recall) \
-        if precision + recall else 0.0
-
-
-def _normalize_prediction_labels(labels):
-    """Không cho OTHER đi cùng role chính trong metric."""
-    labels = set(labels)
-    if labels.intersection(set(ROLES) - {"OTHER"}):
-        labels.discard("OTHER")
-    return labels or {"OTHER"}
-
-
-def validation_metrics(pages, model, tokenizer, device, threshold):
-    """Đánh giá role F1 và row-link F1 để early stopping."""
-    role_counts = {role: [0, 0, 0] for role in ["KEY", "VALUE"]}
-    row_link_counts = [0, 0, 0]
-    model.eval()
-    with torch.inference_mode():
-        for page in pages:
-            encoded = encode_page(page, tokenizer, None, "B", device)
-            prediction = predict_page(
-                model,
-                encoded,
-                page,
-                ROLES,
-                threshold,
-                "row",
-            )
-            labels = page["annotations"]
-            known_ids = {
-                region["id"]
-                for region in page["regions"]
-                if _is_trainable_annotation(labels[region["id"]])
-            }
-            predicted_labels = {
-                region["id"]: _normalize_prediction_labels(region["labels"])
-                for region in prediction["regions"]
-            }
-            for role in role_counts:
-                gold = {
-                    region_id
-                    for region_id in known_ids
-                    if role in labels[region_id]
-                }
-                predicted = {
-                    region_id
-                    for region_id in known_ids
-                    if role in predicted_labels[region_id]
-                }
-                _update_counts(role_counts[role], gold, predicted)
-
-            gold_links = {
-                (key_id, value_id)
-                for relation in page["relations"]
-                for key_id in relation["key_region_ids"]
-                for value_id in relation["value_region_ids"]
-                if key_id in known_ids and value_id in known_ids
-            }
-            predicted_links = {
-                (link["key_region_id"], link["value_region_id"])
-                for link in prediction["links"]
-                if link["key_region_id"] in known_ids
-                and link["value_region_id"] in known_ids
-            }
-            _update_counts(row_link_counts, gold_links, predicted_links)
-
-    key_f1 = _f1_from_counts(role_counts["KEY"])
-    value_f1 = _f1_from_counts(role_counts["VALUE"])
-    row_link_f1 = _f1_from_counts(row_link_counts)
-    role_f1 = (key_f1 + value_f1) / 2
-    val_f1 = 0.5 * role_f1 + 0.5 * row_link_f1
-    model.train()
-    return {
-        "key_f1": key_f1,
-        "value_f1": value_f1,
-        "role_f1": role_f1,
-        "row_link_f1": row_link_f1,
-        "val_f1": val_f1,
     }
 
 
@@ -220,101 +85,6 @@ def _cached_role_logits(role_head, dropout, page, device):
     return role_head(dropout(embeddings)), embeddings
 
 
-def _cached_validation_metrics(pages, role_head, dropout, device):
-    """Đánh giá role F1 và row-link F1 chỉ từ embedding cache."""
-    role_counts = {role: [0, 0, 0] for role in ["KEY", "VALUE"]}
-    row_link_counts = [0, 0, 0]
-    role_head.eval()
-    dropout.eval()
-    with torch.inference_mode():
-        for page in pages:
-            role_logits, embeddings = _cached_role_logits(
-                role_head,
-                dropout,
-                page,
-                device,
-            )
-            role_scores = role_logits.softmax(dim=-1).cpu().tolist()
-            predicted_regions = []
-            for region, scores in zip(
-                page["regions"],
-                role_scores,
-                strict=True,
-            ):
-                best_role_index = max(
-                    range(len(scores)),
-                    key=scores.__getitem__,
-                )
-                predicted_regions.append({
-                    "id": region["id"],
-                    "text": region["text"],
-                    "bbox": region["bbox"],
-                    "labels": [ROLES[best_role_index]],
-                })
-            predicted_links_result = filter_prediction_links({
-                "regions": predicted_regions,
-                "links": row_links(
-                    predicted_regions,
-                    "KEY",
-                    "VALUE",
-                    "key_region_id",
-                    "value_region_id",
-                ),
-            })
-            labels = page["annotations"]
-            known_ids = {
-                region["id"]
-                for region in page["regions"]
-                if _is_trainable_annotation(labels[region["id"]])
-            }
-            predicted_labels = {
-                region["id"]: set(region["labels"])
-                for region in predicted_regions
-            }
-            for role in role_counts:
-                gold = {
-                    region_id
-                    for region_id in known_ids
-                    if role in labels[region_id]
-                }
-                predicted = {
-                    region_id
-                    for region_id in known_ids
-                    if role in predicted_labels[region_id]
-                }
-                _update_counts(role_counts[role], gold, predicted)
-
-            gold_links = {
-                (key_id, value_id)
-                for relation in page["relations"]
-                for key_id in relation["key_region_ids"]
-                for value_id in relation["value_region_ids"]
-                if key_id in known_ids and value_id in known_ids
-            }
-            predicted_links = {
-                (link["key_region_id"], link["value_region_id"])
-                for link in predicted_links_result["links"]
-                if link["key_region_id"] in known_ids
-                and link["value_region_id"] in known_ids
-            }
-            _update_counts(row_link_counts, gold_links, predicted_links)
-            del embeddings
-
-    key_f1 = _f1_from_counts(role_counts["KEY"])
-    value_f1 = _f1_from_counts(role_counts["VALUE"])
-    row_link_f1 = _f1_from_counts(row_link_counts)
-    role_f1 = (key_f1 + value_f1) / 2
-    role_head.train()
-    dropout.train()
-    return {
-        "key_f1": key_f1,
-        "value_f1": value_f1,
-        "role_f1": role_f1,
-        "row_link_f1": row_link_f1,
-        "val_f1": 0.5 * role_f1 + 0.5 * row_link_f1,
-    }
-
-
 def _load_pages(dataset_path):
     """Đọc các page đã xác nhận và có annotation dùng được."""
     dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
@@ -327,51 +97,6 @@ def _load_pages(dataset_path):
             for labels in record["annotations"].values()
         )
     ]
-
-
-def _optimizer_parameters(model, weight_decay):
-    """Tách parameter decay và no-decay theo quy tắc AdamW chuẩn."""
-    decay = []
-    no_decay = []
-    for name, parameter in model.named_parameters():
-        if not parameter.requires_grad:
-            continue
-        if parameter.ndim == 1 or name.endswith("bias"):
-            no_decay.append(parameter)
-        else:
-            decay.append(parameter)
-    return [
-        {"params": decay, "weight_decay": weight_decay},
-        {"params": no_decay, "weight_decay": 0.0},
-    ]
-
-
-def _save_checkpoint(output, tokenizer, model, epoch, metrics, head_dropout):
-    """Lưu tokenizer và checkpoint tốt nhất hiện tại."""
-    if (output / "model.pt").exists():
-        raise FileExistsError(
-            f"Checkpoint đã tồn tại: {output / 'model.pt'}. "
-            "Hãy chọn thư mục output mới cho model single class."
-        )
-    output.mkdir(parents=True, exist_ok=True)
-    tokenizer.save_pretrained(output)
-    model_state = {
-        name: parameter.detach().cpu()
-        for name, parameter in model.state_dict().items()
-    }
-    torch.save(
-        {
-            "roles": ROLES,
-            "role_mode": "single_class",
-            "encoder_config": model.encoder.config.to_dict(),
-            "model_state": model_state,
-            "head_dropout": head_dropout,
-            "link_mode": "row",
-            "best_epoch": epoch,
-            "best_val_metrics": metrics,
-        },
-        output / "model.pt",
-    )
 
 
 def train(arguments):
@@ -410,23 +135,17 @@ def train(arguments):
         for parameter in model.encoder.parameters():
             parameter.requires_grad = False
     optimizer = torch.optim.AdamW(
-        _optimizer_parameters(model, arguments.weight_decay),
+        optimizer_parameters(model, arguments.weight_decay),
         lr=arguments.learning_rate,
     )
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
-    total_steps = arguments.epochs * len(pages)
-    warmup_steps = int(total_steps * arguments.warmup_ratio)
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler = create_scheduler(
         optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
+        arguments.epochs,
+        len(pages),
+        arguments.warmup_ratio,
     )
-    best_val_f1 = float("-inf")
-    best_state = None
-    best_epoch = 0
-    best_metrics = None
-    epochs_without_improvement = 0
-    for epoch in range(arguments.epochs):
+    def train_epoch():
         model.train()
         if arguments.freeze_encoder:
             model.encoder.eval()
@@ -463,56 +182,39 @@ def train(arguments):
             if optimizer_updated:
                 scheduler.step()
             total_loss += loss.detach().item()
-        metrics = validation_metrics(
+        return total_loss / len(pages)
+
+    def validate():
+        return validation_metrics(
             validation_pages,
             model,
             tokenizer,
             arguments.device,
             arguments.threshold,
         )
-        average_loss = total_loss / len(pages)
-        print(
-            f"Epoch {epoch + 1}/{arguments.epochs}: "
-            f"loss={average_loss:.6f}, "
-            f"val_f1={metrics['val_f1']:.4f}, "
-            f"KEY={metrics['key_f1']:.4f}, "
-            f"VALUE={metrics['value_f1']:.4f}, "
-            f"row-link={metrics['row_link_f1']:.4f}",
-            flush=True,
-        )
-        if metrics["val_f1"] > best_val_f1 + arguments.early_stopping_min_delta:
-            best_val_f1 = metrics["val_f1"]
-            best_state = {
-                name: parameter.detach().cpu().clone()
-                for name, parameter in model.state_dict().items()
-            }
-            best_epoch = epoch + 1
-            best_metrics = metrics
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= arguments.early_stopping_patience:
-                print(
-                    f"Early stopping tại epoch {epoch + 1}; "
-                    f"best epoch={best_epoch}, val_f1={best_val_f1:.4f}",
-                    flush=True,
-                )
-                break
 
-    if best_state is None or best_metrics is None:
-        raise RuntimeError("Không tạo được checkpoint tốt nhất theo validation F1.")
-    model.load_state_dict(best_state)
-    _save_checkpoint(
+    early_stopping = run_training_epochs(
+        arguments.epochs,
+        {"model": model},
+        train_epoch,
+        validate,
+        arguments.early_stopping_patience,
+        arguments.early_stopping_min_delta,
+    )
+
+    early_stopping.restore_best({"model": model})
+    save_checkpoint(
         arguments.output,
         tokenizer,
         model,
-        best_epoch,
-        best_metrics,
+        early_stopping.best_epoch,
+        early_stopping.best_metrics,
         arguments.head_dropout,
     )
     print(
         f"Đã lưu best checkpoint text + bbox: {arguments.output} "
-        f"(epoch {best_epoch}, val_f1={best_val_f1:.4f})"
+        f"(epoch {early_stopping.best_epoch}, "
+        f"val_f1={early_stopping.best_score:.4f})"
     )
 
 
@@ -554,20 +256,13 @@ def train_cached(arguments):
         lr=arguments.learning_rate,
         weight_decay=arguments.weight_decay,
     )
-    total_steps = arguments.epochs * len(train_pages)
-    warmup_steps = int(total_steps * arguments.warmup_ratio)
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler = create_scheduler(
         optimizer,
-        num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps,
+        arguments.epochs,
+        len(train_pages),
+        arguments.warmup_ratio,
     )
-    best_val_f1 = float("-inf")
-    best_head_state = None
-    best_epoch = 0
-    best_metrics = None
-    epochs_without_improvement = 0
-
-    for epoch in range(arguments.epochs):
+    def train_epoch():
         role_head.train()
         dropout.train()
         total_loss = 0.0
@@ -589,44 +284,27 @@ def train_cached(arguments):
             scheduler.step()
             total_loss += loss.detach().item()
             del role_logits, embeddings, loss
+        return total_loss / len(train_pages)
 
-        metrics = _cached_validation_metrics(
+    def validate():
+        return _cached_validation_metrics(
             validation_pages,
             role_head,
             dropout,
             arguments.device,
+            _cached_role_logits,
         )
-        average_loss = total_loss / len(train_pages)
-        print(
-            f"Epoch {epoch + 1}/{arguments.epochs}: "
-            f"loss={average_loss:.6f}, "
-            f"val_f1={metrics['val_f1']:.4f}, "
-            f"KEY={metrics['key_f1']:.4f}, "
-            f"VALUE={metrics['value_f1']:.4f}, "
-            f"row-link={metrics['row_link_f1']:.4f}",
-            flush=True,
-        )
-        if metrics["val_f1"] > best_val_f1 + arguments.early_stopping_min_delta:
-            best_val_f1 = metrics["val_f1"]
-            best_head_state = {
-                name: parameter.detach().cpu().clone()
-                for name, parameter in role_head.state_dict().items()
-            }
-            best_epoch = epoch + 1
-            best_metrics = metrics
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= arguments.early_stopping_patience:
-                print(
-                    f"Early stopping tại epoch {epoch + 1}; "
-                    f"best epoch={best_epoch}, val_f1={best_val_f1:.4f}",
-                    flush=True,
-                )
-                break
 
-    if best_head_state is None or best_metrics is None:
-        raise RuntimeError("Không tạo được checkpoint tốt nhất từ embedding cache.")
+    early_stopping = run_training_epochs(
+        arguments.epochs,
+        {"role_head": role_head},
+        train_epoch,
+        validate,
+        arguments.early_stopping_patience,
+        arguments.early_stopping_min_delta,
+    )
+
+    early_stopping.restore_best({"role_head": role_head})
 
     tokenizer = LayoutLMv3TokenizerFast.from_pretrained(arguments.encoder)
     base_model = load_pretrained(
@@ -636,18 +314,19 @@ def train_cached(arguments):
         arguments.seed,
         arguments.head_dropout,
     )
-    base_model.role_head.load_state_dict(best_head_state)
-    _save_checkpoint(
+    base_model.role_head.load_state_dict(role_head.state_dict())
+    save_checkpoint(
         arguments.output,
         tokenizer,
         base_model,
-        best_epoch,
-        best_metrics,
+        early_stopping.best_epoch,
+        early_stopping.best_metrics,
         arguments.head_dropout,
     )
     print(
         f"Đã lưu best checkpoint từ embedding cache: {arguments.output} "
-        f"(epoch {best_epoch}, val_f1={best_val_f1:.4f})",
+        f"(epoch {early_stopping.best_epoch}, "
+        f"val_f1={early_stopping.best_score:.4f})",
     )
 
 
@@ -740,28 +419,29 @@ def predict(arguments):
     print(f"Đã lưu dự đoán {len(predictions)} phiếu: {arguments.output}")
 
 
+def _add_training_arguments(parser):
+    """Đăng ký một lần các tham số dùng chung cho hai chế độ train."""
+    parser.add_argument("--dataset", type=Path, required=True)
+    parser.add_argument("--validation-dataset", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--encoder", default="microsoft/layoutlmv3-base")
+    parser.add_argument("--epochs", type=int, default=50)
+    parser.add_argument("--learning-rate", type=float, default=2e-5)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--weight-decay", type=float, default=0.03)
+    parser.add_argument("--max-grad-norm", type=float, default=1.0)
+    parser.add_argument("--warmup-ratio", type=float, default=0.1)
+    parser.add_argument("--head-dropout", type=float, default=0.3)
+    parser.add_argument("--early-stopping-patience", type=int, default=5)
+    parser.add_argument("--early-stopping-min-delta", type=float, default=1e-4)
+
+
 def main():
     """Đọc lệnh train/predict; tập dữ liệu được người dùng chia bằng script riêng."""
     parser = argparse.ArgumentParser(description="LayoutLMv3 text + bbox, không dùng ảnh.")
     commands = parser.add_subparsers(dest="command", required=True)
     train_parser = commands.add_parser("train", help="Fine-tune từ annotations.json đã xác nhận")
-    train_parser.add_argument("--dataset", type=Path, required=True)
-    train_parser.add_argument("--output", type=Path, required=True)
-    train_parser.add_argument("--encoder", default="microsoft/layoutlmv3-base")
-    train_parser.add_argument("--epochs", type=int, default=50)
-    train_parser.add_argument("--learning-rate", type=float, default=2e-5)
-    train_parser.add_argument("--seed", type=int, default=42)
-    train_parser.add_argument("--validation-dataset", type=Path, required=True)
-    train_parser.add_argument("--weight-decay", type=float, default=0.03)
-    train_parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    train_parser.add_argument("--warmup-ratio", type=float, default=0.1)
-    train_parser.add_argument("--head-dropout", type=float, default=0.3)
-    train_parser.add_argument("--early-stopping-patience", type=int, default=5)
-    train_parser.add_argument(
-        "--early-stopping-min-delta",
-        type=float,
-        default=1e-4,
-    )
+    _add_training_arguments(train_parser)
     train_parser.add_argument("--threshold", type=float, default=0.5)
     train_parser.add_argument(
         "--amp",
@@ -782,23 +462,7 @@ def main():
         "train-cached",
         help="Train role head từ embedding cache đã tạo.",
     )
-    cached_train_parser.add_argument("--dataset", type=Path, required=True)
-    cached_train_parser.add_argument("--validation-dataset", type=Path, required=True)
-    cached_train_parser.add_argument("--output", type=Path, required=True)
-    cached_train_parser.add_argument("--encoder", default="microsoft/layoutlmv3-base")
-    cached_train_parser.add_argument("--epochs", type=int, default=50)
-    cached_train_parser.add_argument("--learning-rate", type=float, default=2e-5)
-    cached_train_parser.add_argument("--seed", type=int, default=42)
-    cached_train_parser.add_argument("--weight-decay", type=float, default=0.03)
-    cached_train_parser.add_argument("--max-grad-norm", type=float, default=1.0)
-    cached_train_parser.add_argument("--warmup-ratio", type=float, default=0.1)
-    cached_train_parser.add_argument("--head-dropout", type=float, default=0.3)
-    cached_train_parser.add_argument("--early-stopping-patience", type=int, default=5)
-    cached_train_parser.add_argument(
-        "--early-stopping-min-delta",
-        type=float,
-        default=1e-4,
-    )
+    _add_training_arguments(cached_train_parser)
     predict_parser = commands.add_parser("predict", help="Dự đoán từ annotation_manifest.json")
     predict_parser.add_argument("--manifest", type=Path, required=True)
     predict_parser.add_argument("--checkpoint", type=Path, required=True)
