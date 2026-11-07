@@ -1,0 +1,14 @@
+{
+  "device": "cpu",
+  "engine": "paddle_static",
+  "recognition_device": "cpu",
+  "page3_device": "cpu",
+  "page3_enable_cross_row_fallback": true,
+  "page3_cross_row_max_vertical_gap": 2.5,
+  "page3_cross_row_min_horizontal_overlap": 0.2,
+  "page3_cross_row_min_score_margin": 0.1,
+  "recognition_model": "vgg_transformer",
+  "page3_checkpoint": "checkpoints/page3_model",
+  "table_01_fields_path": "./config/table_01_fields.json",
+  "input_loader_render_dpi": 400
+}

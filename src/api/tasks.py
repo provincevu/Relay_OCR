@@ -1,5 +1,5 @@
 
-"""RQ task implementation for PDF OCR jobs."""
+"""Triển khai RQ task để xử lý OCR cho file PDF được upload lên."""
 
 import json
 from pathlib import Path
@@ -24,7 +24,7 @@ def get_ocr_service():
 
     return ocr_service
 
-
+# hàm xử lý OCR cho một job cụ thể, được gọi bởi RQ worker
 def process_ocr_job(job_id, source_pdf_path, original_filename=None):
     # 1. kiểm tra đường dẫn và file PDF
     job_directory = (settings.job_root / job_id).resolve()

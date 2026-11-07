@@ -1,5 +1,5 @@
 
-"""Redis Queue worker cho hệ thống OCR"""
+"""Redis Queue worker cho hệ thống OCR, cho phép xử lý các job OCR được gửi từ API."""
 
 import os
 from pathlib import Path

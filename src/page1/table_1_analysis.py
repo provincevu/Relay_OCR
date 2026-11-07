@@ -4,11 +4,11 @@ from pathlib import Path
 
 from paddleocr import LayoutDetection, TableCellsDetection, TextRecognition
 
-from .page1.utils.table_cell_utils import (
+from .utils.table_cell_utils import (
     TableCellProcessor,
     sort_boxes_left_to_right,
 )
-from .page1.utils.table_field_extractor import TableFieldExtractor
+from .utils.table_field_extractor import TableFieldExtractor
 
 
 class Table1Analysis:

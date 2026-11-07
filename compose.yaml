@@ -14,5 +14,69 @@ services:
       retries: 10
       start_period: 5s
 
+  api:
+    image: relay-ocr:cpu
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      - python
+      - -m
+      - uvicorn
+      - src.api.app:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "18010"
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RQ_QUEUE_NAME: ocr
+      OCR_API_TOKEN: ${OCR_API_TOKEN:?Set OCR_API_TOKEN in .env}
+      OCR_JOB_ROOT: /var/lib/relay-ocr/jobs
+      OCR_CONFIG_PATH: /app/config/ocr.cpu.json
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-100}
+      MAX_PDF_PAGES: ${MAX_PDF_PAGES:-300}
+      JOB_RETENTION_DAYS: ${JOB_RETENTION_DAYS:-7}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-86400}
+    ports:
+      - "127.0.0.1:18010:18010"
+    volumes:
+      - ocr_job_data:/var/lib/relay-ocr/jobs
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18010/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  worker:
+    image: relay-ocr:cpu
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "src.api.worker"]
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      RQ_QUEUE_NAME: ocr
+      OCR_JOB_ROOT: /var/lib/relay-ocr/jobs
+      OCR_CONFIG_PATH: /app/config/ocr.cpu.json
+      JOB_RETENTION_DAYS: ${JOB_RETENTION_DAYS:-7}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-86400}
+    volumes:
+      - ocr_job_data:/var/lib/relay-ocr/jobs
+    depends_on:
+      redis:
+        condition: service_healthy
+
 volumes:
   relay_ocr_redis_data:
+  ocr_job_data:
